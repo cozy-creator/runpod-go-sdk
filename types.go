@@ -112,12 +112,41 @@ type CreatePodRequest struct {
 	SupportPublicIP   bool              `json:"supportPublicIp,omitempty"`
 	TemplateID        string            `json:"templateId,omitempty"`
 
+	AllowedCudaVersions []string `json:"allowedCudaVersions,omitempty"`
+
 	// Additional REST API fields
 	ComputeType        string   `json:"computeType,omitempty"` // "GPU" or "CPU"
 	DockerEntrypoint   []string `json:"dockerEntrypoint,omitempty"`
 	DockerStartCmd     []string `json:"dockerStartCmd,omitempty"`
 	GPUTypePriority    string   `json:"gpuTypePriority,omitempty"`
 	DataCenterPriority string   `json:"dataCenterPriority,omitempty"`
+}
+
+const (
+	CudaVersion118  = "11.8"
+	CudaVersion120  = "12.0"
+	CudaVersion121  = "12.1"
+	CudaVersion122  = "12.2"
+	CudaVersion123  = "12.3"
+	CudaVersion124  = "12.4"
+	CudaVersion125  = "12.5"
+	CudaVersion126  = "12.6"
+	CudaVersion128  = "12.8"
+)
+
+// Helper function to create common CUDA version slices
+func AllCudaVersions() []string {
+	return []string{
+		CudaVersion118,
+		CudaVersion120,
+		CudaVersion121,
+		CudaVersion122,
+		CudaVersion123,
+		CudaVersion124,
+		CudaVersion125,
+		CudaVersion126,
+		CudaVersion128,
+	}
 }
 
 type UpdatePodRequest struct {
@@ -151,6 +180,7 @@ type CreateEndpointRequest struct {
 	WorkersMax       int      `json:"workersMax"`
 	IdleTimeout      int      `json:"idleTimeout"`
 	ExecutionTimeout int      `json:"executionTimeoutMs"`
+	AllowedCudaVersions []string `json:"allowedCudaVersions,omitempty"`
 }
 
 type UpdateEndpointRequest struct {
