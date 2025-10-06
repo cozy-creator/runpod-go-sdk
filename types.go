@@ -24,29 +24,84 @@ const (
 )
 
 // UnmarshalJSON lets us parse either RFC-3339 or RunPod's broken format.
+// func (jt *JSONTime) UnmarshalJSON(b []byte) error {
+// 	s := strings.Trim(string(b), `"`)
+// 	if s == "" || s == "null" {
+// 		// leave jt.Time zero
+// 		return nil
+// 	}
+
+// 	// Try RFC-3339 first (proper format)
+// 	if t, err := time.Parse(_layoutRFC3339Nano, s); err == nil {
+// 		jt.Time = t
+// 		return nil
+// 	}
+
+// 	// Try without nanoseconds (common RFC3339 variant)
+// 	if t, err := time.Parse(time.RFC3339, s); err == nil {
+// 		jt.Time = t
+// 		return nil
+// 	}
+
+// 	// Try RunPod's broken format
+// 	if t, err := time.Parse(_layoutRunPodBroken, s); err == nil {
+// 		jt.Time = t
+// 		return nil
+// 	}
+
+// 	return fmt.Errorf("runpod.JSONTime: cannot parse %q as JSONTime", s)
+// }
+
+// UnmarshalJSON lets us parse either RFC-3339 or RunPod's broken format with flexible precision
 func (jt *JSONTime) UnmarshalJSON(b []byte) error {
 	s := strings.Trim(string(b), `"`)
 	if s == "" || s == "null" {
-		// leave jt.Time zero
 		return nil
 	}
 
-	// Try RFC-3339 first (proper format)
-	if t, err := time.Parse(_layoutRFC3339Nano, s); err == nil {
+	// Try RFC-3339 formats first (proper format)
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
 		jt.Time = t
 		return nil
 	}
-
-	// Try without nanoseconds (common RFC3339 variant)
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		jt.Time = t
 		return nil
 	}
 
-	// Try RunPod's broken format
-	if t, err := time.Parse(_layoutRunPodBroken, s); err == nil {
-		jt.Time = t
-		return nil
+	// Handle RunPod's broken format: "2025-10-06 15:27:53.5 +0000 UTC"
+	// Problem: fractional seconds can be 1-6 digits (.5, .53, .535, etc.)
+	if strings.Contains(s, " +") && strings.Contains(s, " UTC") {
+		// Find the fractional seconds part
+		parts := strings.Split(s, ".")
+		if len(parts) == 2 {
+			// Split fractional part from timezone
+			fracAndTZ := strings.SplitN(parts[1], " ", 2)
+			if len(fracAndTZ) == 2 {
+				frac := fracAndTZ[0]
+				tz := fracAndTZ[1]
+				
+				// Normalize fractional seconds to exactly 3 digits
+				if len(frac) < 3 {
+					// Pad with zeros: "5" → "500"
+					for len(frac) < 3 {
+						frac += "0"
+					}
+				} else if len(frac) > 3 {
+					// Truncate: "535678" → "535"
+					frac = frac[:3]
+				}
+				
+				// Reconstruct with normalized format
+				normalized := parts[0] + "." + frac + " " + tz
+				
+				// Try parsing with fixed format
+				if t, err := time.Parse("2006-01-02 15:04:05.000 -0700 MST", normalized); err == nil {
+					jt.Time = t
+					return nil
+				}
+			}
+		}
 	}
 
 	return fmt.Errorf("runpod.JSONTime: cannot parse %q as JSONTime", s)
