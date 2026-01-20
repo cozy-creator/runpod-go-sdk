@@ -149,10 +149,10 @@ func TestIsJobTerminalLive(t *testing.T) {
 	client := runpod.NewClient("dummy")
 
 	tests := map[string]bool{
-		"COMPLETED": true,
-		"FAILED":    true,
-		"CANCELLED": true,
-		"IN_QUEUE":  false,
+		"COMPLETED":   true,
+		"FAILED":      true,
+		"CANCELLED":   true,
+		"IN_QUEUE":    false,
 		"IN_PROGRESS": false,
 	}
 

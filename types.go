@@ -80,7 +80,7 @@ func (jt *JSONTime) UnmarshalJSON(b []byte) error {
 			if len(fracAndTZ) == 2 {
 				frac := fracAndTZ[0]
 				tz := fracAndTZ[1]
-				
+
 				// Normalize fractional seconds to exactly 3 digits
 				if len(frac) < 3 {
 					// Pad with zeros: "5" → "500"
@@ -91,10 +91,10 @@ func (jt *JSONTime) UnmarshalJSON(b []byte) error {
 					// Truncate: "535678" → "535"
 					frac = frac[:3]
 				}
-				
+
 				// Reconstruct with normalized format
 				normalized := parts[0] + "." + frac + " " + tz
-				
+
 				// Try parsing with fixed format
 				if t, err := time.Parse("2006-01-02 15:04:05.000 -0700 MST", normalized); err == nil {
 					jt.Time = t
@@ -178,15 +178,15 @@ type CreatePodRequest struct {
 }
 
 const (
-	CudaVersion118  = "11.8"
-	CudaVersion120  = "12.0"
-	CudaVersion121  = "12.1"
-	CudaVersion122  = "12.2"
-	CudaVersion123  = "12.3"
-	CudaVersion124  = "12.4"
-	CudaVersion125  = "12.5"
-	CudaVersion126  = "12.6"
-	CudaVersion128  = "12.8"
+	CudaVersion118 = "11.8"
+	CudaVersion120 = "12.0"
+	CudaVersion121 = "12.1"
+	CudaVersion122 = "12.2"
+	CudaVersion123 = "12.3"
+	CudaVersion124 = "12.4"
+	CudaVersion125 = "12.5"
+	CudaVersion126 = "12.6"
+	CudaVersion128 = "12.8"
 )
 
 // Helper function to create common CUDA version slices
@@ -226,15 +226,15 @@ type Endpoint struct {
 }
 
 type CreateEndpointRequest struct {
-	Name             string   `json:"name"`
-	TemplateID       string   `json:"templateId"`
-	GPUTypeIDs       []string `json:"gpuTypeIds"`
-	ScalerType       string   `json:"scalerType"`
-	ScalerValue      int      `json:"scalerValue"`
-	WorkersMin       int      `json:"workersMin"`
-	WorkersMax       int      `json:"workersMax"`
-	IdleTimeout      int      `json:"idleTimeout"`
-	ExecutionTimeout int      `json:"executionTimeoutMs"`
+	Name                string   `json:"name"`
+	TemplateID          string   `json:"templateId"`
+	GPUTypeIDs          []string `json:"gpuTypeIds"`
+	ScalerType          string   `json:"scalerType"`
+	ScalerValue         int      `json:"scalerValue"`
+	WorkersMin          int      `json:"workersMin"`
+	WorkersMax          int      `json:"workersMax"`
+	IdleTimeout         int      `json:"idleTimeout"`
+	ExecutionTimeout    int      `json:"executionTimeoutMs"`
 	AllowedCudaVersions []string `json:"allowedCudaVersions,omitempty"`
 }
 
