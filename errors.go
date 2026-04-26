@@ -113,6 +113,20 @@ type RateLimitError struct {
 	ResetTime  string
 }
 
+// CapabilityNotAvailableError indicates the provider/API does not expose a requested feature.
+type CapabilityNotAvailableError struct {
+	Feature string
+	Reason  string
+}
+
+// Error implements the error interface.
+func (e *CapabilityNotAvailableError) Error() string {
+	if e.Reason == "" {
+		return fmt.Sprintf("capability not available: %s", e.Feature)
+	}
+	return fmt.Sprintf("capability not available: %s (%s)", e.Feature, e.Reason)
+}
+
 // Error implements the error interface
 func (e *RateLimitError) Error() string {
 	return fmt.Sprintf("rate limit exceeded: %s (retry after: %s)", e.Message, e.RetryAfter)
@@ -177,6 +191,13 @@ func NewRateLimitError(message, retryAfter string) *RateLimitError {
 	}
 }
 
+func NewCapabilityNotAvailableError(feature, reason string) *CapabilityNotAvailableError {
+	return &CapabilityNotAvailableError{
+		Feature: feature,
+		Reason:  reason,
+	}
+}
+
 // ================================
 // ERROR CHECKING HELPERS
 // ================================
@@ -214,5 +235,11 @@ func IsAuthError(err error) bool {
 // IsRateLimitError checks if an error is a RateLimitError
 func IsRateLimitError(err error) bool {
 	_, ok := err.(*RateLimitError)
+	return ok
+}
+
+// IsCapabilityNotAvailable checks if an error is a CapabilityNotAvailableError.
+func IsCapabilityNotAvailable(err error) bool {
+	_, ok := err.(*CapabilityNotAvailableError)
 	return ok
 }

@@ -21,6 +21,9 @@ const (
 	// DefaultServerlessBaseURL is the base URL for serverless operations
 	DefaultServerlessBaseURL = "https://api.runpod.ai"
 
+	// DefaultGraphQLBaseURL is the default RunPod GraphQL API URL
+	DefaultGraphQLBaseURL = "https://api.runpod.io/graphql"
+
 	// DefaultTimeout is the default HTTP client timeout
 	DefaultTimeout = 30 * time.Second
 
@@ -40,6 +43,7 @@ type Client struct {
 	APIKey            string
 	BaseURL           string
 	ServerlessBaseURL string
+	GraphQLBaseURL    string
 
 	// HTTP client configuration
 	HTTPClient *http.Client
@@ -80,6 +84,13 @@ func WithBaseURL(baseURL string) ClientOption {
 func WithServerlessBaseURL(baseURL string) ClientOption {
 	return func(c *Client) {
 		c.ServerlessBaseURL = baseURL
+	}
+}
+
+// WithGraphQLBaseURL sets a custom base URL for GraphQL operations.
+func WithGraphQLBaseURL(baseURL string) ClientOption {
+	return func(c *Client) {
+		c.GraphQLBaseURL = baseURL
 	}
 }
 
@@ -142,6 +153,7 @@ func NewClient(apiKey string, opts ...ClientOption) *Client {
 		APIKey:            apiKey,
 		BaseURL:           DefaultBaseURL,
 		ServerlessBaseURL: DefaultServerlessBaseURL,
+		GraphQLBaseURL:    DefaultGraphQLBaseURL,
 		HTTPClient: &http.Client{
 			Timeout: DefaultTimeout,
 		},
@@ -247,6 +259,10 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, body in
 
 // buildURL constructs the full URL for a given endpoint
 func (c *Client) buildURL(endpoint string) string {
+	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
+		return endpoint
+	}
+
 	// If endpoint starts with /v2/ or contains api.runpod.ai, it's a serverless endpoint
 	if strings.HasPrefix(endpoint, "/v2/") || strings.Contains(endpoint, "api.runpod.ai") {
 		if strings.HasPrefix(endpoint, "/v2/") {
@@ -526,6 +542,11 @@ func (c *Client) GetBaseURL() string {
 // GetServerlessBaseURL returns the configured serverless base URL
 func (c *Client) GetServerlessBaseURL() string {
 	return c.ServerlessBaseURL
+}
+
+// GetGraphQLBaseURL returns the configured GraphQL base URL.
+func (c *Client) GetGraphQLBaseURL() string {
+	return c.GraphQLBaseURL
 }
 
 // IsDebugEnabled returns whether debug mode is enabled

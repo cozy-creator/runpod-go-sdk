@@ -64,19 +64,78 @@
         ]
       },
       "tasks": [
-        "[ ] Add GraphQL client support (the SDK currently only uses REST)",
-        "[ ] Define GPUTypeFilter input struct",
-        "[ ] Define GPUTypeWithAvailability response struct (extends existing GPUType)",
-        "[ ] Implement ListGPUTypes(ctx, filter) - basic query without availability",
-        "[ ] Implement ListAvailableGPUs(ctx, minCudaVersion, gpuCount) - with lowestPrice/availability",
-        "[ ] Implement GetGPUType(ctx, gpuTypeID) - single GPU lookup",
-        "[ ] Add minCudaVersion/allowedCudaVersions to CreatePodRequest for pod creation",
-        "[ ] Update existing pod creation methods to support CUDA version constraints",
-        "[ ] Add tests with mock GraphQL responses",
-        "[ ] Update README with GPU query examples"
+        "[x] Add GraphQL client support (the SDK currently only uses REST)",
+        "[x] Define GPUTypeFilter input struct",
+        "[x] Define GPUTypeWithAvailability response struct (extends existing GPUType)",
+        "[x] Implement ListGPUTypes(ctx, filter) - basic query without availability",
+        "[x] Implement ListAvailableGPUs(ctx, minCudaVersion, gpuCount) - with lowestPrice/availability",
+        "[x] Implement GetGPUType(ctx, gpuTypeID) - single GPU lookup",
+        "[x] Add minCudaVersion/allowedCudaVersions to CreatePodRequest for pod creation",
+        "[x] Update existing pod creation methods to support CUDA version constraints",
+        "[x] Add tests with mock GraphQL responses",
+        "[x] Update README with GPU query examples"
       ],
       "priority": "high",
-      "status": "planned"
+      "status": "completed"
+    },
+    {
+      "id": 2,
+      "name": "Pod Diagnostics API (No Pod-Log Dependency)",
+      "description": "Research summary (February 11, 2026):\n- RunPod REST OpenAPI (`https://rest.runpod.io/v1/openapi.json`) documents pod lifecycle endpoints (`/pods`, `/pods/{podId}`, start/stop/reset/restart/update) but no pod log endpoint.\n- Hitting `GET https://rest.runpod.io/v1/pods/{id}/logs` returns a route-not-found error (path/method does not exist).\n- RunPod GraphQL validates that `Pod` has no `logs` field (`Cannot query field \"logs\" on type \"Pod\"`).\n\nImplication:\n- Programmatic pod container log retrieval is not a supported public API capability right now, and may remain unsupported.\n- The SDK must not introduce new log-fetch features that depend on undocumented endpoints.\n\nGoal:\n- Make diagnostics first-class in SDK using supported fields (status/runtime/machine/lastStatusChange).\n- Keep logs explicitly out of scope for orchestration-critical paths.",
+      "proposed_api": {
+        "types": [
+          {
+            "name": "PodDiagnostics",
+            "fields": {
+              "PodID": "string",
+              "DesiredStatus": "string",
+              "LastStatusChange": "string",
+              "RuntimeReady": "bool (derived: runtime != nil and runtime.ports/publicIp available)",
+              "Runtime": "PodRuntime (typed snapshot)",
+              "Machine": "Machine (typed snapshot, optional includeMachine)",
+              "DataCenterID": "string (best-effort from machine/network volume)",
+              "PublicIP": "string",
+              "PortMappings": "map[string]int",
+              "NetworkVolumeID": "string",
+              "ProviderReason": "string (best-effort from API fields)"
+            }
+          },
+          {
+            "name": "ProviderFeatureSupport",
+            "fields": {
+              "PodLogsAPI": "bool (currently always false for RunPod public API)",
+              "Reason": "string"
+            }
+          }
+        ],
+        "methods": [
+          {
+            "signature": "func (c *Client) GetPodWithOptions(ctx context.Context, podID string, opts *GetPodOptions) (*Pod, error)",
+            "description": "Typed support for includeMachine/includeNetworkVolume/includeSavingsPlans/includeTemplate/includeWorkers query params."
+          },
+          {
+            "signature": "func (c *Client) GetPodDiagnostics(ctx context.Context, podID string) (*PodDiagnostics, error)",
+            "description": "Returns a normalized diagnostics snapshot for scheduler/orchestrator startup and disconnect troubleshooting."
+          },
+          {
+            "signature": "func (c *Client) GetProviderFeatureSupport(ctx context.Context) ProviderFeatureSupport",
+            "description": "Returns current SDK understanding of pod log availability via public API."
+          }
+        ]
+      },
+      "tasks": [
+        "[x] Add `GetPodOptions` and `GetPodWithOptions` to typed pod API surface",
+        "[x] Add `PodDiagnostics` struct and `GetPodDiagnostics` helper",
+        "[x] Add explicit capability error (`ErrCapabilityNotAvailable`) for unsupported provider features",
+        "[x] Update `GetPodLogs` semantics:\n  - mark deprecated in docs\n  - return `ErrCapabilityNotAvailable` when endpoint is unavailable\n  - do not treat missing `/pods/{id}/logs` as a transient retryable error",
+        "[x] Add `GetProviderFeatureSupport` API (with `PodLogsAPI=false` for RunPod public API)",
+        "[x] Add unit tests for route-not-found and capability errors",
+        "[x] Update README: clearly separate \"pod lifecycle diagnostics\" from \"pod logs\" and note current provider limitation",
+        "[x] Add explicit non-goal note in README/progress: no new SDK log streaming/tailing implementation without a documented supported RunPod API",
+        "[x] Add integration test matrix (best-effort): verify diagnostics fields under CREATED/RUNNING/EXITED and includeMachine toggles"
+      ],
+      "priority": "high",
+      "status": "completed"
     }
   ]
 }

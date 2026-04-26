@@ -16,42 +16,6 @@ type JSONTime struct {
 	time.Time
 }
 
-const (
-	// RFC3339 format (what RunPod docs show and should use)
-	_layoutRFC3339Nano = time.RFC3339Nano
-	// RunPod's actual broken format (what they currently return)
-	_layoutRunPodBroken = "2006-01-02 15:04:05.000 -0700 MST"
-)
-
-// UnmarshalJSON lets us parse either RFC-3339 or RunPod's broken format.
-// func (jt *JSONTime) UnmarshalJSON(b []byte) error {
-// 	s := strings.Trim(string(b), `"`)
-// 	if s == "" || s == "null" {
-// 		// leave jt.Time zero
-// 		return nil
-// 	}
-
-// 	// Try RFC-3339 first (proper format)
-// 	if t, err := time.Parse(_layoutRFC3339Nano, s); err == nil {
-// 		jt.Time = t
-// 		return nil
-// 	}
-
-// 	// Try without nanoseconds (common RFC3339 variant)
-// 	if t, err := time.Parse(time.RFC3339, s); err == nil {
-// 		jt.Time = t
-// 		return nil
-// 	}
-
-// 	// Try RunPod's broken format
-// 	if t, err := time.Parse(_layoutRunPodBroken, s); err == nil {
-// 		jt.Time = t
-// 		return nil
-// 	}
-
-// 	return fmt.Errorf("runpod.JSONTime: cannot parse %q as JSONTime", s)
-// }
-
 // UnmarshalJSON lets us parse either RFC-3339 or RunPod's broken format with flexible precision
 func (jt *JSONTime) UnmarshalJSON(b []byte) error {
 	s := strings.Trim(string(b), `"`)
@@ -71,7 +35,16 @@ func (jt *JSONTime) UnmarshalJSON(b []byte) error {
 
 	// Handle RunPod's broken format: "2025-10-06 15:27:53.5 +0000 UTC"
 	// Problem: fractional seconds can be 1-6 digits (.5, .53, .535, etc.)
+	//
+	// They also sometimes omit fractional seconds entirely:
+	//   "2026-02-14 11:27:20 +0000 UTC"
 	if strings.Contains(s, " +") && strings.Contains(s, " UTC") {
+		// First try without fractional seconds.
+		if t, err := time.Parse("2006-01-02 15:04:05 -0700 MST", s); err == nil {
+			jt.Time = t
+			return nil
+		}
+
 		// Find the fractional seconds part
 		parts := strings.Split(s, ".")
 		if len(parts) == 2 {
@@ -119,6 +92,7 @@ type Pod struct {
 	ID                string            `json:"id"`
 	Name              string            `json:"name"`
 	DesiredStatus     string            `json:"desiredStatus"`
+	LastStatusChange  string            `json:"lastStatusChange,omitempty"`
 	ImageName         string            `json:"image"`
 	GPUCount          int               `json:"gpuCount"`
 	VCPUCount         int               `json:"vcpuCount"`
@@ -136,6 +110,10 @@ type Pod struct {
 	Locked            bool              `json:"locked"`
 	Interruptible     bool              `json:"interruptible"`
 	PublicIP          string            `json:"publicIp,omitempty"`
+	Runtime           *PodRuntime       `json:"runtime,omitempty"`
+	Machine           *Machine          `json:"machine,omitempty"`
+	NetworkVolume     *NetworkVolume    `json:"networkVolume,omitempty"`
+	NetworkVolumeID   string            `json:"networkVolumeId,omitempty"`
 }
 
 func (p *Pod) Status() string {
@@ -143,31 +121,49 @@ func (p *Pod) Status() string {
 }
 
 type PodRuntime struct {
-	UptimeSeconds    int    `json:"uptimeSeconds"`
-	LastStartedAt    string `json:"lastStartedAt"`
-	LastStatusCharge string `json:"lastStatusCharge"`
+	UptimeSeconds     int                    `json:"uptimeSeconds"`
+	LastStartedAt     string                 `json:"lastStartedAt"`
+	LastStatusChange  string                 `json:"lastStatusChange,omitempty"`
+	LastStatusCharge  string                 `json:"lastStatusCharge,omitempty"`
+	PublicIP          string                 `json:"publicIp,omitempty"`
+	Ports             map[string]interface{} `json:"ports,omitempty"`
+	Status            string                 `json:"status,omitempty"`
+	Reason            string                 `json:"reason,omitempty"`
+	Error             string                 `json:"error,omitempty"`
+	ContainerExitCode int                    `json:"containerExitCode,omitempty"`
+}
+
+type Machine struct {
+	ID           string `json:"id"`
+	Name         string `json:"name,omitempty"`
+	GPUTypeID    string `json:"gpuTypeId,omitempty"`
+	DataCenterID string `json:"dataCenterId,omitempty"`
+	Region       string `json:"region,omitempty"`
+	CountryCode  string `json:"countryCode,omitempty"`
 }
 
 type CreatePodRequest struct {
-	Name              string            `json:"name"`
-	ImageName         string            `json:"imageName"`
-	GPUTypeIDs        []string          `json:"gpuTypeIds"`
-	GPUCount          int               `json:"gpuCount"`
-	VCPUCount         int               `json:"vcpuCount,omitempty"`
-	ContainerDiskInGB int               `json:"containerDiskInGb"`
-	VolumeInGB        int               `json:"volumeInGb,omitempty"`
-	VolumeMountPath   string            `json:"volumeMountPath,omitempty"`
-	DataCenterIDs     []string          `json:"dataCenterIds,omitempty"`
-	Env               map[string]string `json:"env,omitempty"`
-	Ports             []string          `json:"ports,omitempty"`
-	DockerArgs        string            `json:"dockerArgs,omitempty"`
-	NetworkVolumeID   string            `json:"networkVolumeId,omitempty"`
-	CloudType         string            `json:"cloudType,omitempty"`     // "SECURE" or "COMMUNITY"
-	Interruptible     bool              `json:"interruptible,omitempty"` // For spot instances
-	SupportPublicIP   bool              `json:"supportPublicIp,omitempty"`
-	TemplateID        string            `json:"templateId,omitempty"`
+	Name                    string            `json:"name"`
+	ImageName               string            `json:"imageName"`
+	ContainerRegistryAuthId string            `json:"containerRegistryAuthId,omitempty"`
+	GPUTypeIDs              []string          `json:"gpuTypeIds"`
+	GPUCount                int               `json:"gpuCount"`
+	VCPUCount               int               `json:"vcpuCount,omitempty"`
+	ContainerDiskInGB       int               `json:"containerDiskInGb"`
+	VolumeInGB              int               `json:"volumeInGb,omitempty"`
+	VolumeMountPath         string            `json:"volumeMountPath,omitempty"`
+	DataCenterIDs           []string          `json:"dataCenterIds,omitempty"`
+	Env                     map[string]string `json:"env,omitempty"`
+	Ports                   []string          `json:"ports,omitempty"`
+	DockerArgs              string            `json:"dockerArgs,omitempty"`
+	NetworkVolumeID         string            `json:"networkVolumeId,omitempty"`
+	CloudType               string            `json:"cloudType,omitempty"`     // "SECURE" or "COMMUNITY"
+	Interruptible           bool              `json:"interruptible,omitempty"` // For spot instances
+	SupportPublicIP         bool              `json:"supportPublicIp,omitempty"`
+	TemplateID              string            `json:"templateId,omitempty"`
 
 	AllowedCudaVersions []string `json:"allowedCudaVersions,omitempty"`
+	MinCudaVersion      string   `json:"minCudaVersion,omitempty"`
 
 	// Additional REST API fields
 	ComputeType        string   `json:"computeType,omitempty"` // "GPU" or "CPU"
@@ -339,6 +335,50 @@ type Price struct {
 	MinimumBidPrice      float64 `json:"minimumBidPrice"`
 	UninterruptablePrice float64 `json:"uninterruptablePrice"`
 	InterruptablePrice   float64 `json:"interruptablePrice,omitempty"`
+	StockStatus          string  `json:"stockStatus,omitempty"`
+	CudaVersion          string  `json:"cudaVersion,omitempty"`
+}
+
+type GPUTypeFilter struct {
+	IDs                 []string
+	MinCudaVersion      string
+	AllowedCudaVersions []string
+	SecureCloud         *bool
+	CommunityCloud      *bool
+	GPUCount            int
+}
+
+type GPUTypeWithAvailability struct {
+	GPUType
+	StockStatus    string
+	AvailableCount int
+}
+
+type GetPodOptions struct {
+	IncludeMachine       bool
+	IncludeNetworkVolume bool
+	IncludeSavingsPlans  bool
+	IncludeTemplate      bool
+	IncludeWorkers       bool
+}
+
+type PodDiagnostics struct {
+	PodID            string
+	DesiredStatus    string
+	LastStatusChange string
+	RuntimeReady     bool
+	Runtime          *PodRuntime
+	Machine          *Machine
+	DataCenterID     string
+	PublicIP         string
+	PortMappings     map[string]int
+	NetworkVolumeID  string
+	ProviderReason   string
+}
+
+type ProviderFeatureSupport struct {
+	PodLogsAPI bool
+	Reason     string
 }
 
 type Datacenter struct {

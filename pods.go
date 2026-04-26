@@ -2,7 +2,10 @@ package runpod
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -24,21 +27,46 @@ func (c *Client) CreatePod(ctx context.Context, req *CreatePodRequest) (*Pod, er
 }
 
 // CreateSpotPod creates a new spot/interruptible pod instance
-func (c *Client) CreateSpotPod(ctx context.Context, req *CreatePodRequest, bidPerGPU float64) (*Pod, error) {
-	// Set spot-specific fields
+func (c *Client) CreateSpotPod(ctx context.Context, req *CreatePodRequest) (*Pod, error) {
 	req.Interruptible = true
-
 	return c.CreatePod(ctx, req)
 }
 
 // GetPod retrieves a pod by ID
 func (c *Client) GetPod(ctx context.Context, podID string) (*Pod, error) {
+	return c.GetPodWithOptions(ctx, podID, nil)
+}
+
+// GetPodWithOptions retrieves a pod by ID with include* query options.
+func (c *Client) GetPodWithOptions(ctx context.Context, podID string, opts *GetPodOptions) (*Pod, error) {
 	if err := c.validateRequired("podID", podID); err != nil {
 		return nil, err
 	}
 
-	var pod Pod
 	endpoint := fmt.Sprintf("/pods/%s", podID)
+	if opts != nil {
+		q := url.Values{}
+		if opts.IncludeMachine {
+			q.Set("includeMachine", "true")
+		}
+		if opts.IncludeNetworkVolume {
+			q.Set("includeNetworkVolume", "true")
+		}
+		if opts.IncludeSavingsPlans {
+			q.Set("includeSavingsPlans", "true")
+		}
+		if opts.IncludeTemplate {
+			q.Set("includeTemplate", "true")
+		}
+		if opts.IncludeWorkers {
+			q.Set("includeWorkers", "true")
+		}
+		if encoded := q.Encode(); encoded != "" {
+			endpoint += "?" + encoded
+		}
+	}
+
+	var pod Pod
 	err := c.Get(ctx, endpoint, &pod)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get pod %s: %w", podID, err)
@@ -51,16 +79,34 @@ func (c *Client) GetPod(ctx context.Context, podID string) (*Pod, error) {
 func (c *Client) ListPods(ctx context.Context, opts *ListOptions) ([]*Pod, error) {
 	endpoint := c.buildListURL("/pods", opts)
 
-	var response struct {
-		Pods []*Pod `json:"pods"`
-	}
-
-	err := c.Get(ctx, endpoint, &response)
-	if err != nil {
+	// RunPod has returned multiple shapes for this endpoint over time:
+	// - {"pods":[...]}
+	// - [...]
+	//
+	// Be permissive so higher-level schedulers can reliably enforce max_workers / pod counts.
+	var raw json.RawMessage
+	if err := c.Get(ctx, endpoint, &raw); err != nil {
 		return nil, fmt.Errorf("failed to list pods: %w", err)
 	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
 
-	return response.Pods, nil
+	// Prefer object wrapper (documented shape).
+	var wrapped struct {
+		Pods []*Pod `json:"pods"`
+	}
+	if err := json.Unmarshal(raw, &wrapped); err == nil && wrapped.Pods != nil {
+		return wrapped.Pods, nil
+	}
+
+	// Fallback: bare array.
+	var pods []*Pod
+	if err := json.Unmarshal(raw, &pods); err == nil {
+		return pods, nil
+	}
+
+	return nil, fmt.Errorf("failed to list pods: unexpected response shape")
 }
 
 // StopPod stops a running pod
@@ -109,7 +155,9 @@ func (c *Client) TerminatePod(ctx context.Context, podID string) error {
 	return nil
 }
 
-// GetPodLogs retrieves logs for a pod
+// GetPodLogs retrieves logs for a pod.
+// Deprecated: RunPod public APIs do not reliably expose pod logs.
+// This method maps a route-not-found response into ErrCapabilityNotAvailable.
 func (c *Client) GetPodLogs(ctx context.Context, podID string) (string, error) {
 	if err := c.validateRequired("podID", podID); err != nil {
 		return "", err
@@ -122,6 +170,10 @@ func (c *Client) GetPodLogs(ctx context.Context, podID string) (string, error) {
 	endpoint := fmt.Sprintf("/pods/%s/logs", podID)
 	err := c.Get(ctx, endpoint, &response)
 	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == 404 {
+			return "", NewCapabilityNotAvailableError("pod_logs_api", "RunPod public API does not expose /pods/{id}/logs")
+		}
 		return "", fmt.Errorf("failed to get logs for pod %s: %w", podID, err)
 	}
 
@@ -293,6 +345,10 @@ func (c *Client) validateCreatePodRequest(req *CreatePodRequest) error {
 		if !isValid {
 			return NewValidationErrorWithValue("computeType", "must be either 'GPU' or 'CPU'", req.ComputeType)
 		}
+	}
+
+	if strings.TrimSpace(req.MinCudaVersion) != "" && len(req.AllowedCudaVersions) > 0 {
+		return NewValidationError("minCudaVersion", "cannot be set together with allowedCudaVersions")
 	}
 
 	return nil

@@ -5,6 +5,8 @@ A comprehensive Go client library for the RunPod REST API, providing programmati
 ## 🚀 Features
 
 - ✅ **Pod Management** - Create, monitor, and manage GPU/CPU pods
+- ✅ **GPU Catalog Discovery** - Query GPU types with CUDA-aware availability filters
+- ✅ **Pod Diagnostics** - Typed pre-connect diagnostics snapshots for scheduler/bootstrap debugging
 - ✅ **Serverless Jobs** - Submit, monitor, and manage serverless job execution
 - ✅ **Complete REST API** - Full RunPod REST API support
 - ✅ **Error Handling** - Comprehensive error types and retry logic
@@ -105,6 +107,58 @@ if err != nil {
     log.Fatal("Failed to terminate pod:", err)
 }
 fmt.Printf("🗑️  Pod terminated\n")
+```
+
+### GPU Discovery (CUDA-Aware)
+
+```go
+ctx := context.Background()
+
+// 1. List GPU types that can satisfy CUDA >= 12.8
+gpuTypes, err := client.ListGPUTypes(ctx, &runpod.GPUTypeFilter{
+    MinCudaVersion: "12.8",
+    SecureCloud:    ptrBool(true),
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("Found %d secure-cloud GPU types\n", len(gpuTypes))
+
+// 2. Find currently available GPUs for a placement decision
+available, err := client.ListAvailableGPUs(ctx, "12.8", 1)
+if err != nil {
+    log.Fatal(err)
+}
+for _, g := range available {
+    fmt.Printf("%s stock=%s price=$%.2f/hr\n", g.DisplayName, g.StockStatus, g.LowestPrice.UninterruptablePrice)
+}
+
+// 3. Fetch one exact GPU type
+gpu, err := client.GetGPUType(ctx, "NVIDIA GeForce RTX 4090")
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("GPU %s memory=%dGB\n", gpu.DisplayName, gpu.MemoryInGB)
+```
+
+### Pod Diagnostics (Pre-Connect Friendly)
+
+```go
+ctx := context.Background()
+
+diag, err := client.GetPodDiagnostics(ctx, "your-pod-id")
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("status=%s runtime_ready=%v datacenter=%s reason=%s\n",
+    diag.DesiredStatus, diag.RuntimeReady, diag.DataCenterID, diag.ProviderReason)
+
+cap := client.GetProviderFeatureSupport(ctx)
+fmt.Printf("pod_logs_api=%v reason=%s\n", cap.PodLogsAPI, cap.Reason)
+```
+
+```go
+func ptrBool(v bool) *bool { return &v }
 ```
 
 ### Serverless Job Management
@@ -299,6 +353,7 @@ client := runpod.NewClient("your-api-key",
     // API Configuration
     runpod.WithBaseURL("https://custom.runpod.io/v1"),     // Custom API URL
     runpod.WithServerlessBaseURL("https://custom.api.runpod.ai/v2"), // Custom serverless URL
+    runpod.WithGraphQLBaseURL("https://api.runpod.io/graphql"), // GPU catalog GraphQL URL
     
     // HTTP Configuration  
     runpod.WithTimeout(120*time.Second),                   // Request timeout
@@ -322,12 +377,15 @@ client := runpod.NewClient("your-api-key",
 | `LaunchRunPod()` | Quick pod creation with defaults |
 | `CreatePod()` | Full pod creation with all options |
 | `GetPod()` | Get complete pod details |
+| `GetPodWithOptions()` | Get pod details with include flags (`includeMachine`, `includeNetworkVolume`, etc.) |
 | `GetPodStatus()` | Get just the pod status |
+| `GetPodDiagnostics()` | Get normalized provider diagnostics (runtime readiness, datacenter, reason) |
+| `GetProviderFeatureSupport()` | Check provider feature support (for RunPod, pod logs are unsupported) |
 | `ListPods()` | List all pods with pagination |
 | `StopPod()` | Stop a running pod |
 | `ResumePod()` | Resume a stopped pod |
 | `TerminatePod()` | Terminate/delete a pod |
-| `GetPodLogs()` | Get pod logs |
+| `GetPodLogs()` | Deprecated; returns capability error when provider has no pod logs API |
 | `WaitForPodStatus()` | Wait for specific status |
 | `FindPodByName()` | Find pod by name |
 
@@ -390,6 +448,7 @@ if err != nil {
 - **`TimeoutError`** - Request timeout errors
 - **`AuthError`** - Authentication/authorization errors
 - **`RateLimitError`** - Rate limiting errors
+- **`CapabilityNotAvailableError`** - Feature not exposed by provider API (e.g., pod logs)
 
 ## 🔍 Debug Mode
 
@@ -468,7 +527,9 @@ type EndpointHealth struct {
 - [ ] **DeleteTemplate** - Delete templates
 
 ### Phase 6: Resource Information 📊
-- [ ] **ListGPUTypes** - Get available GPU types and pricing
+- [x] **ListGPUTypes** - Get available GPU types with CUDA-aware filtering
+- [x] **ListAvailableGPUs** - Get currently available GPU inventory by CUDA requirement
+- [x] **GetGPUType** - Fetch details for a specific GPU type id
 - [ ] **GetGPUPricing** - Get current GPU pricing information
 - [ ] **ListDatacenters** - Get available datacenter locations
 - [ ] **GetAccountInfo** - Get account details and limits
