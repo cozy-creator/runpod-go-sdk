@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	runpod "github.com/cozy-creator/runpod-go-library"
+	runpod "github.com/cozy-creator/runpod-go-sdk"
 )
 
 type testGraphQLRequest struct {

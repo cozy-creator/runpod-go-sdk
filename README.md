@@ -21,7 +21,7 @@ A comprehensive Go client library for the RunPod REST API, providing programmati
 
 ```bash
 go mod init your-project
-go get github.com/cozy-creator/runpod-go-library
+go get github.com/cozy-creator/runpod-go-sdk
 ```
 
 ## 🎯 Quick Start
@@ -37,7 +37,7 @@ import (
     "log"
     "time"
     
-    "github.com/cozy-creator/runpod-go-library"
+    "github.com/cozy-creator/runpod-go-sdk"
 )
 
 func main() {

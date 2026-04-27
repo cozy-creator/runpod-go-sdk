@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cozy-creator/runpod-go-library"
+	"github.com/cozy-creator/runpod-go-sdk"
 )
 
 // ================================

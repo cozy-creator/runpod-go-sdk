@@ -1,4 +1,4 @@
-module github.com/cozy-creator/runpod-go-library
+module github.com/cozy-creator/runpod-go-sdk
 
 go 1.24.4
 

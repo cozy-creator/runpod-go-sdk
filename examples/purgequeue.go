@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/cozy-creator/runpod-go-library"
+	"github.com/cozy-creator/runpod-go-sdk"
 	"github.com/joho/godotenv"
 )
 
