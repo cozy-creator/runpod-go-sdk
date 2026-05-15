@@ -268,7 +268,14 @@ func (c *Client) FindPodByName(ctx context.Context, name string) (*Pod, error) {
 	}
 }
 
-// validateCreatePodRequest validates a pod creation request
+// validateCreatePodRequest validates a pod creation request. The GPU-only
+// fields (gpuTypeIds, gpuCount) are required when ComputeType="GPU" or empty
+// (the SDK historically defaulted to GPU); for CPU pods (ComputeType="CPU")
+// they are forbidden — RunPod's REST API rejects unknown fields outright, so
+// sending a zeroed gpuCount on a CPU request would fail. CPU placement allows
+// an optional cpuFlavorIds list to constrain which CPU family to land on, but
+// the list is not required — RunPod auto-picks the cheapest available flavor
+// when omitted.
 func (c *Client) validateCreatePodRequest(req *CreatePodRequest) error {
 	if req == nil {
 		return NewValidationError("request", "cannot be nil")
@@ -281,14 +288,29 @@ func (c *Client) validateCreatePodRequest(req *CreatePodRequest) error {
 	if err := c.validateRequired("imageName", req.ImageName); err != nil {
 		return err
 	}
-	if err := c.validateRequired("gpuTypeId", req.GPUTypeIDs); err != nil {
-		return err
+
+	// Compute-class-specific selector validation.
+	isCPU := strings.EqualFold(strings.TrimSpace(req.ComputeType), "CPU")
+	if isCPU {
+		if len(req.GPUTypeIDs) > 0 {
+			return NewValidationError("gpuTypeIds", "must not be set when computeType is CPU")
+		}
+		if req.GPUCount > 0 {
+			return NewValidationError("gpuCount", "must not be set when computeType is CPU")
+		}
+	} else {
+		// GPU is the historical default; require the GPU selector + count.
+		if err := c.validateRequired("gpuTypeId", req.GPUTypeIDs); err != nil {
+			return err
+		}
+		if err := c.validatePositive("gpuCount", req.GPUCount); err != nil {
+			return err
+		}
+		if len(req.CPUFlavorIDs) > 0 {
+			return NewValidationError("cpuFlavorIds", "must not be set unless computeType is CPU")
+		}
 	}
 
-	// Validate positive values
-	if err := c.validatePositive("gpuCount", req.GPUCount); err != nil {
-		return err
-	}
 	if err := c.validatePositive("containerDiskInGb", req.ContainerDiskInGB); err != nil {
 		return err
 	}
@@ -296,11 +318,6 @@ func (c *Client) validateCreatePodRequest(req *CreatePodRequest) error {
 	// Optional positive values
 	if req.VCPUCount > 0 {
 		if err := c.validatePositive("vcpuCount", req.VCPUCount); err != nil {
-			return err
-		}
-	}
-	if req.VolumeInGB > 0 {
-		if err := c.validatePositive("volumeInGb", req.VolumeInGB); err != nil {
 			return err
 		}
 	}

@@ -114,6 +114,14 @@ type Pod struct {
 	Machine           *Machine          `json:"machine,omitempty"`
 	NetworkVolume     *NetworkVolume    `json:"networkVolume,omitempty"`
 	NetworkVolumeID   string            `json:"networkVolumeId,omitempty"`
+
+	// CPU-pod-specific response fields. RunPod's REST `POST /pods` returns
+	// `cpuFlavorId` (the family the instance was placed on, e.g. "cpu3c")
+	// when ComputeType="CPU". The vcpu/memory fields above are populated
+	// for both compute classes. For CPU pods, Machine.GPUTypeID comes back
+	// as the sentinel "unknown" — callers should treat that as "no GPU"
+	// rather than as a real GPU type.
+	CPUFlavorID string `json:"cpuFlavorId,omitempty"`
 }
 
 func (p *Pod) Status() string {
@@ -143,24 +151,46 @@ type Machine struct {
 }
 
 type CreatePodRequest struct {
-	Name                    string            `json:"name"`
-	ImageName               string            `json:"imageName"`
-	ContainerRegistryAuthId string            `json:"containerRegistryAuthId,omitempty"`
-	GPUTypeIDs              []string          `json:"gpuTypeIds"`
-	GPUCount                int               `json:"gpuCount"`
-	VCPUCount               int               `json:"vcpuCount,omitempty"`
-	ContainerDiskInGB       int               `json:"containerDiskInGb"`
-	VolumeInGB              int               `json:"volumeInGb,omitempty"`
-	VolumeMountPath         string            `json:"volumeMountPath,omitempty"`
-	DataCenterIDs           []string          `json:"dataCenterIds,omitempty"`
-	Env                     map[string]string `json:"env,omitempty"`
-	Ports                   []string          `json:"ports,omitempty"`
-	DockerArgs              string            `json:"dockerArgs,omitempty"`
-	NetworkVolumeID         string            `json:"networkVolumeId,omitempty"`
-	CloudType               string            `json:"cloudType,omitempty"`     // "SECURE" or "COMMUNITY"
-	Interruptible           bool              `json:"interruptible,omitempty"` // For spot instances
-	SupportPublicIP         bool              `json:"supportPublicIp,omitempty"`
-	TemplateID              string            `json:"templateId,omitempty"`
+	Name                    string `json:"name"`
+	ImageName               string `json:"imageName"`
+	ContainerRegistryAuthId string `json:"containerRegistryAuthId,omitempty"`
+
+	// GPU placement (ComputeType="GPU" or empty). GPUTypeIDs is a
+	// fallback-ordered list of acceptable GPU type IDs (e.g.,
+	// "NVIDIA GeForce RTX 4090"); RunPod picks the first available. Omit
+	// these on CPU requests — `omitempty` is required because RunPod's REST
+	// validator rejects unknown/unexpected fields with `Extra input keys
+	// provided in request body`, and an explicit `gpuTypeIds: null` /
+	// `gpuCount: 0` would be sent on a CPU request without it.
+	GPUTypeIDs []string `json:"gpuTypeIds,omitempty"`
+	GPUCount   int      `json:"gpuCount,omitempty"`
+
+	// CPU placement (ComputeType="CPU"). CPUFlavorIDs is a fallback-ordered
+	// list of acceptable CPU family IDs (e.g., "cpu5c", "cpu3c", "cpu3g");
+	// RunPod picks the first available. Optional — if omitted, RunPod
+	// auto-selects the cheapest available CPU flavor. Family IDs are the
+	// REST API's vocabulary; the older GraphQL CPU mutation used granular
+	// IDs (`cpu5c-2-2`) but REST accepts only family-level IDs.
+	//
+	// Note: REST does not accept `minVCpuCount` / `minMemoryInGb` as inputs.
+	// To target a specific vCPU/memory size, pick families from the static
+	// catalog (see cpu_types.go) — but be aware RunPod within a family will
+	// still pick the cheapest instance size it has stock for.
+	CPUFlavorIDs []string `json:"cpuFlavorIds,omitempty"`
+
+	VCPUCount         int               `json:"vcpuCount,omitempty"`
+	ContainerDiskInGB int               `json:"containerDiskInGb"`
+	VolumeInGB        int               `json:"volumeInGb,omitempty"`
+	VolumeMountPath   string            `json:"volumeMountPath,omitempty"`
+	DataCenterIDs     []string          `json:"dataCenterIds,omitempty"`
+	Env               map[string]string `json:"env,omitempty"`
+	Ports             []string          `json:"ports,omitempty"`
+	DockerArgs        string            `json:"dockerArgs,omitempty"`
+	NetworkVolumeID   string            `json:"networkVolumeId,omitempty"`
+	CloudType         string            `json:"cloudType,omitempty"`     // "SECURE" or "COMMUNITY"
+	Interruptible     bool              `json:"interruptible,omitempty"` // For spot instances
+	SupportPublicIP   bool              `json:"supportPublicIp,omitempty"`
+	TemplateID        string            `json:"templateId,omitempty"`
 
 	AllowedCudaVersions []string `json:"allowedCudaVersions,omitempty"`
 	MinCudaVersion      string   `json:"minCudaVersion,omitempty"`
