@@ -430,20 +430,39 @@ type AccountInfo struct {
 	MachineQuota      int     `json:"machineQuota,omitempty"`
 }
 
-// NetworkVolume represents a network volume
+// NetworkVolume represents a network volume.
 type NetworkVolume struct {
 	ID           string    `json:"id"`
 	Name         string    `json:"name"`
-	Size         int       `json:"size"`
-	DatacenterID string    `json:"datacenterId"`
+	Size         int       `json:"size"` // GB
+	DataCenterID string    `json:"dataCenterId"`
 	CreatedAt    *JSONTime `json:"createdAt"`
 	PodIds       []string  `json:"podIds,omitempty"`
 }
 
 type CreateNetworkVolumeRequest struct {
 	Name         string `json:"name"`
-	Size         int    `json:"size"`
-	DatacenterID string `json:"datacenterId"`
+	Size         int    `json:"size"` // GB
+	DataCenterID string `json:"dataCenterId"`
+}
+
+// UpdateNetworkVolumeRequest updates a network volume. Size can only grow.
+type UpdateNetworkVolumeRequest struct {
+	Name string `json:"name,omitempty"`
+	Size int    `json:"size,omitempty"` // GB
+}
+
+// ContainerRegistryAuth is a stored Docker registry credential used by pods
+// to pull private images. The password is never returned by the API.
+type ContainerRegistryAuth struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type CreateContainerRegistryAuthRequest struct {
+	Name     string `json:"name"`
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 type WebhookConfig struct {

@@ -5,6 +5,75 @@ import (
 	"fmt"
 )
 
+// ErrNoCapacity is a sentinel matched (via errors.Is) by capacity-related
+// pod-create failures. RunPod signals stock-outs as HTTP 500 with a
+// "no instances available" style message; the SDK classifies those into
+// *NoCapacityError which matches this sentinel.
+var ErrNoCapacity = errors.New("runpod: no capacity")
+
+// NoCapacityError is returned when RunPod has no stock for the requested
+// GPU type / datacenter combination. errors.Is(err, ErrNoCapacity) is true.
+type NoCapacityError struct {
+	GPUTypeID     string
+	DataCenterIDs []string
+	Cause         error
+}
+
+func (e *NoCapacityError) Error() string {
+	msg := "no capacity"
+	if e.GPUTypeID != "" {
+		msg += fmt.Sprintf(" for GPU type %q", e.GPUTypeID)
+	}
+	if len(e.DataCenterIDs) > 0 {
+		msg += fmt.Sprintf(" in datacenters %v", e.DataCenterIDs)
+	}
+	if e.Cause != nil {
+		msg += ": " + e.Cause.Error()
+	}
+	return "runpod: " + msg
+}
+
+func (e *NoCapacityError) Unwrap() error { return e.Cause }
+
+func (e *NoCapacityError) Is(target error) bool { return target == ErrNoCapacity }
+
+// FallbackAttempt records one failed candidate during a pod-create fan-out.
+type FallbackAttempt struct {
+	GPUTypeID string
+	Err       error
+}
+
+// FallbackExhaustedError is returned by CreatePodWithFallback when every
+// candidate GPU type failed. errors.Is sees through to the per-attempt
+// errors, so errors.Is(err, ErrNoCapacity) is true when any attempt was a
+// capacity failure.
+type FallbackExhaustedError struct {
+	Attempts []FallbackAttempt
+}
+
+func (e *FallbackExhaustedError) Error() string {
+	tried := make([]string, len(e.Attempts))
+	for i, a := range e.Attempts {
+		tried[i] = a.GPUTypeID
+	}
+	last := "no attempts made"
+	if n := len(e.Attempts); n > 0 && e.Attempts[n-1].Err != nil {
+		last = e.Attempts[n-1].Err.Error()
+	}
+	return fmt.Sprintf("runpod: all %d candidate GPU types failed %v; last error: %s", len(e.Attempts), tried, last)
+}
+
+// Unwrap exposes the per-attempt errors to errors.Is / errors.As.
+func (e *FallbackExhaustedError) Unwrap() []error {
+	out := make([]error, 0, len(e.Attempts))
+	for _, a := range e.Attempts {
+		if a.Err != nil {
+			out = append(out, a.Err)
+		}
+	}
+	return out
+}
+
 type APIError struct {
 	StatusCode int    `json:"statusCode"`
 	Message    string `json:"message"`
