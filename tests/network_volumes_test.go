@@ -52,7 +52,7 @@ func TestNetworkVolumeCRUD(t *testing.T) {
 	server := newVolumeServer(t)
 	defer server.Close()
 
-	client := runpod.NewClient("test_key", runpod.WithBaseURL(server.URL))
+	client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL))
 	ctx := context.Background()
 
 	volumes, err := client.ListNetworkVolumes(ctx)
@@ -95,7 +95,7 @@ func TestNetworkVolumeCRUD(t *testing.T) {
 }
 
 func TestNetworkVolumeValidation(t *testing.T) {
-	client := runpod.NewClient("test_key")
+	client := mustClient(t, "test_key")
 	ctx := context.Background()
 
 	if _, err := client.CreateNetworkVolume(ctx, nil); err == nil {
@@ -118,7 +118,7 @@ func TestNetworkVolumesLive(t *testing.T) {
 	if apiKey == "" {
 		t.Skip("live test: RUNPOD_API_KEY not set")
 	}
-	client := runpod.NewClient(apiKey)
+	client := mustClient(t, apiKey)
 	volumes, err := client.ListNetworkVolumes(context.Background())
 	if err != nil {
 		t.Fatalf("live list network volumes: %v", err)

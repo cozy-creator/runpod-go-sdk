@@ -32,7 +32,7 @@ func TestGetPodWithOptions_QueryParams(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := runpod.NewClient("test_key", runpod.WithBaseURL(server.URL+"/v1"))
+	client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL+"/v1"))
 	_, err := client.GetPodWithOptions(context.Background(), "pod-1", &runpod.GetPodOptions{
 		IncludeMachine:       true,
 		IncludeNetworkVolume: true,
@@ -80,7 +80,7 @@ func TestGetPodDiagnostics_StatusMatrix(t *testing.T) {
 				},
 				"networkVolume": map[string]interface{}{
 					"id":           "vol-1",
-					"datacenterId": "US-CA-1",
+					"dataCenterId": "US-CA-1",
 				},
 			},
 			wantRuntimeReady: true,
@@ -121,7 +121,7 @@ func TestGetPodDiagnostics_StatusMatrix(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client := runpod.NewClient("test_key", runpod.WithBaseURL(server.URL))
+			client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL))
 			diag, err := client.GetPodDiagnostics(context.Background(), "pod-any")
 			if err != nil {
 				t.Fatalf("GetPodDiagnostics error: %v", err)
@@ -140,28 +140,8 @@ func TestGetPodDiagnostics_StatusMatrix(t *testing.T) {
 	}
 }
 
-func TestGetPodLogs_RouteNotFoundBecomesCapabilityError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"message": "route not found",
-		})
-	}))
-	defer server.Close()
-
-	client := runpod.NewClient("test_key", runpod.WithBaseURL(server.URL))
-	_, err := client.GetPodLogs(context.Background(), "pod-1")
-	if err == nil {
-		t.Fatal("expected capability error")
-	}
-	if !runpod.IsCapabilityNotAvailable(err) {
-		t.Fatalf("expected CapabilityNotAvailableError, got %T (%v)", err, err)
-	}
-}
-
 func TestGetProviderFeatureSupport(t *testing.T) {
-	client := runpod.NewClient("test_key")
+	client := mustClient(t, "test_key")
 	cap := client.GetProviderFeatureSupport(context.Background())
 	if cap.PodLogsAPI {
 		t.Fatal("expected pod logs capability to be false")

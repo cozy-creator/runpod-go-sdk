@@ -3,7 +3,6 @@ package runpod
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"time"
 )
 
@@ -20,7 +19,7 @@ func (c *Client) RunAsync(ctx context.Context, endpointID string, input interfac
 
 	req := &RunJobRequest{Input: input}
 
-	endpoint := fmt.Sprintf("/v2/%s/run", endpointID)
+	endpoint := c.serverlessURL(fmt.Sprintf("/v2/%s/run", endpointID))
 
 	var job Job
 	err := c.Post(ctx, endpoint, req, &job)
@@ -31,8 +30,13 @@ func (c *Client) RunAsync(ctx context.Context, endpointID string, input interfac
 	return &job, nil
 }
 
-// RunSync submits a synchronous job and waits for completion
-// Blocks until the job completes or times out
+// RunSync submits a synchronous job and waits for completion.
+// Blocks until the job completes or times out.
+//
+// The client's HTTP timeout (default 30s) bounds this call. RunPod holds
+// /runsync connections for up to ~90s for long jobs — construct the client
+// with WithTimeout (or use RunAsync + WaitForJobCompletion) for jobs that
+// may run longer than the configured timeout.
 func (c *Client) RunSync(ctx context.Context, endpointID string, input interface{}) (*Job, error) {
 	if err := c.validateRequired("endpointID", endpointID); err != nil {
 		return nil, err
@@ -40,7 +44,7 @@ func (c *Client) RunSync(ctx context.Context, endpointID string, input interface
 
 	req := &RunJobRequest{Input: input}
 
-	endpoint := fmt.Sprintf("/v2/%s/runsync", endpointID)
+	endpoint := c.serverlessURL(fmt.Sprintf("/v2/%s/runsync", endpointID))
 
 	var job Job
 	err := c.Post(ctx, endpoint, req, &job)
@@ -60,7 +64,7 @@ func (c *Client) GetJobStatus(ctx context.Context, endpointID, jobID string) (*J
 		return nil, err
 	}
 
-	endpoint := fmt.Sprintf("/v2/%s/status/%s", endpointID, jobID)
+	endpoint := c.serverlessURL(fmt.Sprintf("/v2/%s/status/%s", endpointID, jobID))
 
 	var job Job
 	err := c.Get(ctx, endpoint, &job)
@@ -80,7 +84,7 @@ func (c *Client) CancelJob(ctx context.Context, endpointID, jobID string) error 
 		return err
 	}
 
-	endpoint := fmt.Sprintf("/v2/%s/cancel/%s", endpointID, jobID)
+	endpoint := c.serverlessURL(fmt.Sprintf("/v2/%s/cancel/%s", endpointID, jobID))
 
 	err := c.Post(ctx, endpoint, nil, nil)
 	if err != nil {
@@ -99,7 +103,7 @@ func (c *Client) RetryJob(ctx context.Context, endpointID, jobID string) (*Job, 
 		return nil, err
 	}
 
-	endpoint := fmt.Sprintf("/v2/%s/retry/%s", endpointID, jobID)
+	endpoint := c.serverlessURL(fmt.Sprintf("/v2/%s/retry/%s", endpointID, jobID))
 
 	var job Job
 	err := c.Post(ctx, endpoint, nil, &job)
@@ -117,7 +121,7 @@ func (c *Client) PurgeQueue(ctx context.Context, endpointID string) error {
 		return err
 	}
 
-	endpoint := fmt.Sprintf("/v2/%s/purge-queue", endpointID)
+	endpoint := c.serverlessURL(fmt.Sprintf("/v2/%s/purge-queue", endpointID))
 
 	err := c.Post(ctx, endpoint, nil, nil)
 	if err != nil {
@@ -133,7 +137,7 @@ func (c *Client) GetHealth(ctx context.Context, endpointID string) (*EndpointHea
 		return nil, err
 	}
 
-	endpoint := fmt.Sprintf("/v2/%s/health", endpointID)
+	endpoint := c.serverlessURL(fmt.Sprintf("/v2/%s/health", endpointID))
 
 	var health EndpointHealth
 	err := c.Get(ctx, endpoint, &health)
@@ -207,95 +211,6 @@ func (c *Client) IsJobTerminal(status string) bool {
 }
 
 // ================================
-// BATCH JOB OPERATIONS
-// ================================
-
-// SubmitMultipleJobs submits multiple jobs to the same endpoint asynchronously
-func (c *Client) SubmitMultipleJobs(ctx context.Context, endpointID string, inputs []interface{}) ([]*Job, error) {
-	if err := c.validateRequired("endpointID", endpointID); err != nil {
-		return nil, err
-	}
-	if len(inputs) == 0 {
-		return nil, NewValidationError("inputs", "cannot be empty")
-	}
-
-	var jobs []*Job
-	var errors []error
-
-	for i, input := range inputs {
-		job, err := c.RunAsync(ctx, endpointID, input)
-		if err != nil {
-			errors = append(errors, fmt.Errorf("job %d failed: %w", i, err))
-			continue
-		}
-		jobs = append(jobs, job)
-	}
-
-	// If any jobs failed to submit, return error with details
-	if len(errors) > 0 {
-		return jobs, fmt.Errorf("failed to submit %d out of %d jobs: %v", len(errors), len(inputs), errors)
-	}
-
-	return jobs, nil
-}
-
-// WaitForMultipleJobs waits for multiple jobs to complete
-func (c *Client) WaitForMultipleJobs(ctx context.Context, endpointID string, jobIDs []string, maxWaitTime time.Duration) ([]*Job, error) {
-	if len(jobIDs) == 0 {
-		return nil, NewValidationError("jobIDs", "cannot be empty")
-	}
-
-	results := make([]*Job, len(jobIDs))
-	completed := make([]bool, len(jobIDs))
-
-	deadline := time.Now().Add(maxWaitTime)
-
-	for time.Now().Before(deadline) {
-		allCompleted := true
-
-		for i, jobID := range jobIDs {
-			if completed[i] {
-				continue // Already completed
-			}
-
-			job, err := c.GetJobStatus(ctx, endpointID, jobID)
-			if err != nil {
-				return results, fmt.Errorf("failed to get status for job %s: %w", jobID, err)
-			}
-
-			if c.IsJobTerminal(job.Status) {
-				results[i] = job
-				completed[i] = true
-			} else {
-				allCompleted = false
-			}
-		}
-
-		if allCompleted {
-			return results, nil
-		}
-
-		// Wait before next check
-		select {
-		case <-ctx.Done():
-			return results, ctx.Err()
-		case <-time.After(5 * time.Second):
-			// Continue polling
-		}
-	}
-
-	// Count how many completed
-	completedCount := 0
-	for _, isCompleted := range completed {
-		if isCompleted {
-			completedCount++
-		}
-	}
-
-	return results, fmt.Errorf("%d out of %d jobs completed within %v", completedCount, len(jobIDs), maxWaitTime)
-}
-
-// ================================
 // STREAMING SUPPORT
 // ================================
 
@@ -311,7 +226,7 @@ func (c *Client) StreamResults(ctx context.Context, endpointID, jobID string) (*
 	}
 
 	// RunPod stream endpoint: /v2/{endpoint_id}/stream/{job_id}
-	endpoint := fmt.Sprintf("/v2/%s/stream/%s", endpointID, jobID)
+	endpoint := c.serverlessURL(fmt.Sprintf("/v2/%s/stream/%s", endpointID, jobID))
 
 	var job Job
 	err := c.Get(ctx, endpoint, &job)
@@ -320,65 +235,6 @@ func (c *Client) StreamResults(ctx context.Context, endpointID, jobID string) (*
 	}
 
 	return &job, nil
-}
-
-// StreamResultsContinuous polls the stream endpoint for continuous updates
-// Returns channels for job updates and errors - useful for long-running jobs
-// This provides a convenient wrapper around StreamResults for real-time monitoring
-func (c *Client) StreamResultsContinuous(ctx context.Context, endpointID, jobID string, pollInterval time.Duration) (<-chan *Job, <-chan error) {
-	if pollInterval <= 0 {
-		pollInterval = 2 * time.Second // Default poll interval
-	}
-
-	jobChan := make(chan *Job, 1)
-	errChan := make(chan error, 1)
-
-	go func() {
-		defer close(jobChan)
-		defer close(errChan)
-
-		ticker := time.NewTicker(pollInterval)
-		defer ticker.Stop()
-
-		var lastOutput interface{}
-
-		for {
-			select {
-			case <-ctx.Done():
-				errChan <- ctx.Err()
-				return
-			case <-ticker.C:
-				job, err := c.StreamResults(ctx, endpointID, jobID)
-				if err != nil {
-					errChan <- err
-					return
-				}
-
-				// Send update if output has changed or status changed
-				outputChanged := !compareOutputs(lastOutput, job.Output)
-				if outputChanged {
-					select {
-					case jobChan <- job:
-						lastOutput = job.Output
-					case <-ctx.Done():
-						return
-					}
-				}
-
-				// Stop streaming if job is terminal
-				if c.IsJobTerminal(job.Status) {
-					return
-				}
-			}
-		}
-	}()
-
-	return jobChan, errChan
-}
-
-// compareOutputs compares two job outputs to detect changes
-func compareOutputs(a, b interface{}) bool {
-	return reflect.DeepEqual(a, b)
 }
 
 // ================================
@@ -396,16 +252,4 @@ func (c *Client) RunAndWait(ctx context.Context, endpointID string, input interf
 
 	// Wait for completion
 	return c.WaitForJobCompletion(ctx, endpointID, job.ID, maxWaitTime)
-}
-
-// QuickRun is a convenience function for simple synchronous job execution
-// Uses reasonable defaults for timeout and error handling
-func (c *Client) QuickRun(ctx context.Context, endpointID string, input interface{}) (*Job, error) {
-	// Try sync first (faster for quick jobs)
-	job, err := c.RunSync(ctx, endpointID, input)
-	if err != nil {
-		// If sync fails, try async with wait
-		return c.RunAndWait(ctx, endpointID, input, 5*time.Minute)
-	}
-	return job, nil
 }

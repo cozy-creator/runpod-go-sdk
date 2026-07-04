@@ -41,7 +41,7 @@ func TestContainerRegistryAuthCRUD(t *testing.T) {
 	server := newRegistryAuthServer(t)
 	defer server.Close()
 
-	client := runpod.NewClient("test_key", runpod.WithBaseURL(server.URL))
+	client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL))
 	ctx := context.Background()
 
 	auths, err := client.ListContainerRegistryAuths(ctx)
@@ -81,7 +81,7 @@ func TestIsRegistryAuthError(t *testing.T) {
 		{"registry auth message", fmt.Errorf("create pod: %w", runpod.NewAPIError(500, "invalid container registry auth id")), true},
 		{"pull access denied", runpod.NewAPIError(500, "pull access denied for repository"), true},
 		{"capacity error is not auth", &runpod.NoCapacityError{GPUTypeID: "A"}, false},
-		{"sdk api-key auth error is not registry auth", runpod.NewAuthError("invalid or expired API key"), false},
+		{"sdk api-key auth error is not registry auth", runpod.NewAPIError(401, "invalid or expired API key"), false},
 		{"unrelated", runpod.NewAPIError(500, "internal error"), false},
 	}
 	for _, tc := range cases {
@@ -103,7 +103,7 @@ func TestContainerRegistryAuthsLive(t *testing.T) {
 	if apiKey == "" {
 		t.Skip("live test: RUNPOD_API_KEY not set")
 	}
-	client := runpod.NewClient(apiKey)
+	client := mustClient(t, apiKey)
 	auths, err := client.ListContainerRegistryAuths(context.Background())
 	if err != nil {
 		t.Fatalf("live list container registry auths: %v", err)

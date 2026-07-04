@@ -182,8 +182,8 @@ func (c *Client) StreamPodCommand(ctx context.Context, podID, cmd string, stdout
 	sshCmd.Stdout = stdout
 	sshCmd.Stderr = stdout
 
-	if c.Debug {
-		c.Logger.Printf("[DEBUG] StreamPodCommand pod=%s cmd=%q ssh-args=%v", podID, cmd, args)
+	if c.debug {
+		c.logger.Printf("[DEBUG] StreamPodCommand pod=%s cmd=%q ssh-args=%v", podID, cmd, args)
 	}
 
 	if err := sshCmd.Run(); err != nil {

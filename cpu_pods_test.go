@@ -12,7 +12,11 @@ import (
 // touch the network. We construct a minimal client instead.
 
 func newValidationClient() *Client {
-	return NewClient("test-key")
+	c, err := NewClient("test-key")
+	if err != nil {
+		panic(err)
+	}
+	return c
 }
 
 func TestValidateCreatePodRequest_GPU_RequiresGPUFields(t *testing.T) {

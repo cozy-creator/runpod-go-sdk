@@ -43,3 +43,55 @@ RunPod's REST API now exposes network volumes (`GET/POST/PATCH/DELETE /networkvo
 - [x] Typed detection for registry-auth pod-create failures (replace consumer string matching)
 - [x] Mock-server tests + RUNPOD_API_KEY-gated live test
 - [ ] (deferred to tensorhub tracker adoption issue) Migrate tensorhub off its local Client/GraphQLRequest and delete it
+
+---
+
+# #4: Delete dead/speculative API surface
+
+**Status:** DONE (2026-07-04)
+
+Deleted: Endpoint/Template/Webhook/Datacenter/AccountInfo/UpdatePodRequest types, ValidationErrors, TimeoutError, GPUType.CostPerHour/.Available, deriveAvailableCount + GPUTypeWithAvailability.AvailableCount, GetPodLogs, the trivial pod wrappers (ListRunningPods/ListStoppedPods/ListPodsByStatus/FindPodByName/GetPodStatus/WaitForPodStatus), client getters, and the jobs conveniences (QuickRun/SubmitMultipleJobs/WaitForMultipleJobs/StreamResultsContinuous/compareOutputs). CreateNetworkVolumeRequest kept — methods implemented in #5. README pruned to the surviving surface. cmd/ was never tracked in git (nothing to remove).
+
+Audit 2026-07. Large parts of the SDK are aspirational coverage that nothing calls, was never finished (types with zero methods), or was never runnable. Pre-launch, hard-cut:
+
+- Types with NO methods anywhere: `Endpoint`, `CreateEndpointRequest`, `UpdateEndpointRequest`, `Template`, `CreateTemplateRequest`, `UpdateTemplateRequest`, `UpdatePodRequest`, `WebhookConfig`, `Datacenter`, `AccountInfo`, `CreateNetworkVolumeRequest` (keep `NetworkVolume` — used by pod includes; or implement the methods, see #5)
+- `ValidationErrors` slice type: never constructed
+- `TimeoutError` / `NewTimeoutError`: never constructed, so `IsTimeoutError` can never be true (real timeouts surface as `NetworkError`)
+- `GPUType.CostPerHour` and `GPUType.Available`: never populated (the GraphQL query doesn't select them) — misleading
+- `deriveAvailableCount` invents counts (2/1) from stock status strings — return the status, not fake numbers; drop `GPUTypeWithAvailability.AvailableCount`
+- `GetPodLogs`: deprecated, endpoint doesn't exist; `GetPodDiagnostics`/feature-support already model this — delete
+- `ListRunningPods`/`ListStoppedPods`/`ListPodsByStatus`/`FindPodByName`/`GetPodStatus`: trivial client-side wrappers over `ListPods`; callers can filter
+- Getter boilerplate `GetBaseURL`/`GetServerlessBaseURL`/`GetGraphQLBaseURL`/`IsDebugEnabled`/`GetAPIKey` on already-exported fields
+- Serverless jobs surface is unused by tensorhub but is real, tested API coverage — KEEP, but drop the thin conveniences `QuickRun`, `SubmitMultipleJobs`, `WaitForMultipleJobs`, `StreamResultsContinuous`, `compareOutputs` unless a consumer materializes
+- Empty `cmd/` directory
+
+## Tasks
+- [x] Delete the symbols above; `go build ./... && go test ./...`
+- [x] Prune README sections for deleted surface
+- [x] Re-check against tensorhub (only consumer) before each deletion
+
+---
+
+# #6: Coherent client core: error model, retry policy, construction
+
+**Status:** DONE (2026-07-04)
+
+NewClient returns (*Client, error); config fields unexported (options-only). Exponential backoff + jitter, Retry-After honored on 429 (APIError.RetryAfter). Error model collapsed to APIError + ValidationError (+ NoCapacityError/FallbackExhaustedError from #3) with ErrNotFound/ErrUnauthorized/ErrRateLimited/ErrNoCapacity sentinels via errors.Is. /v2/ URL-sniffing removed — serverless methods build absolute URLs against the serverless base. Job.Input/Output/Stream are json.RawMessage. WaitForPodStatus deleted in favor of WaitForPodReady; RunSync timeout interplay documented.
+
+Audit 2026-07. The client core mostly works but has fossil edges:
+
+- `NewClient` panics on empty API key — return `(*Client, error)` or defer failure to first call with a typed AuthError
+- Client fields are all exported and mutable (`APIKey`, `HTTPClient`, ...) while also having functional options AND getter methods — pick one: unexported fields + options
+- Retry is linear (`RetryDelay * attempt`), no jitter, ignores `Retry-After` on 429, and the retryable-error path re-POSTs (partially fixed by the 2026-07 audit PR: POSTs no longer retry on 5xx; honoring Retry-After on 429 retries remains)
+- Errors: seven hand-rolled error types with `New*`/`Is*` constructor+predicate boilerplate. Collapse to `APIError` (with `errors.Is` sentinel support: `ErrNotFound`, `ErrNoCapacity`, `ErrRateLimited`...) + `ValidationError`; drop the rest
+- `buildURL`'s `/v2/` string-sniffing to route serverless vs REST — make the serverless surface explicit (e.g. `c.Serverless()` sub-client or explicit base per method group)
+- `Job.Input/Output/Stream interface{}` — use `json.RawMessage` so callers unmarshal into their own types
+- `WaitForPodStatus(maxAttempts)` and hardcoded 5s polls — take a poll interval/deadline like `WaitForPodReady` does; or delete in favor of `WaitForPodReady`
+- `RunSync` can outlive the client's 30s HTTP timeout for long jobs — document or set per-call timeout
+
+## Tasks
+- [x] Constructor returns error; unexport config fields
+- [x] Exponential backoff + jitter + Retry-After
+- [x] Error model collapse w/ sentinel `errors.Is` support
+- [x] Explicit serverless routing; kill URL sniffing
+- [x] `json.RawMessage` job payloads

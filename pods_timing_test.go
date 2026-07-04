@@ -49,7 +49,7 @@ func newStubServer(t *testing.T, script *stubPodScript) (*httptest.Server, *Clie
 	})
 	srv := httptest.NewServer(mux)
 
-	c := NewClient("test-key",
+	c, _ := NewClient("test-key",
 		WithBaseURL(srv.URL),
 		WithGraphQLBaseURL(srv.URL+"/graphql"),
 		WithMaxRetryAttempts(0),
@@ -262,7 +262,7 @@ func TestStubServerHonorsPodPath(t *testing.T) {
 		_, _ = fmt.Fprintf(w, `{"id":"x","desiredStatus":"RUNNING"}`)
 	}))
 	defer srv.Close()
-	c := NewClient("k", WithBaseURL(srv.URL), WithMaxRetryAttempts(0))
+	c, _ := NewClient("k", WithBaseURL(srv.URL), WithMaxRetryAttempts(0))
 	_, err := c.GetPod(context.Background(), "abc-123")
 	if err != nil {
 		t.Fatalf("GetPod error: %v", err)

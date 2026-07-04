@@ -28,7 +28,7 @@ func (c *Client) GraphQL(ctx context.Context, query string, variables map[string
 		return NewValidationError("query", "cannot be empty")
 	}
 
-	endpoint := strings.TrimSpace(c.GraphQLBaseURL)
+	endpoint := strings.TrimSpace(c.graphqlBaseURL)
 	if endpoint == "" {
 		endpoint = DefaultGraphQLBaseURL
 	}
@@ -45,11 +45,11 @@ func (c *Client) GraphQL(ctx context.Context, query string, variables map[string
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return NewNetworkError("failed to read GraphQL response body", err)
+		return fmt.Errorf("failed to read GraphQL response body: %w", err)
 	}
 
-	if c.Debug {
-		c.Logger.Printf("[DEBUG] GraphQL response status=%d body=%s", resp.StatusCode, string(body))
+	if c.debug {
+		c.logger.Printf("[DEBUG] GraphQL response status=%d body=%s", resp.StatusCode, string(body))
 	}
 
 	if resp.StatusCode >= 400 {

@@ -95,9 +95,9 @@ func IsRegistryAuthError(err error) bool {
 	if err == nil {
 		return false
 	}
-	// The SDK's own API-key failures are typed AuthError — not registry auth.
-	var authErr *AuthError
-	if errors.As(err, &authErr) {
+	// The SDK's own API-key/permission failures (401/403) are not registry
+	// auth problems — those come back as pod-create 5xxs with auth-ish text.
+	if errors.Is(err, ErrUnauthorized) {
 		return false
 	}
 	// Capacity failures are never registry-auth failures.

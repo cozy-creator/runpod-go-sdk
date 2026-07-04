@@ -2,6 +2,7 @@ package runpod
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -61,7 +62,7 @@ func (c *Client) CreateOrUpdateSecret(ctx context.Context, name, value string) e
 	_, err := c.GetSecret(ctx, name)
 	if err != nil {
 		// If not found, create new secret
-		if apiErr, ok := err.(*APIError); ok && apiErr.IsNotFound() {
+		if errors.Is(err, ErrNotFound) {
 			_, createErr := c.CreateSecret(ctx, &CreateSecretRequest{
 				Name:  name,
 				Value: value,
