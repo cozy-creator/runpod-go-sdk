@@ -19,8 +19,8 @@ type testGraphQLRequest struct {
 func newGPUTypeGraphQLServer(t *testing.T, handler func(req testGraphQLRequest) interface{}) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.URL.Query().Get("api_key"); got != "test_key" {
-			t.Fatalf("expected api_key query param, got %q", got)
+		if got := r.URL.Query().Get("api_key"); got != "" {
+			t.Fatalf("api key must not leak into the URL, got %q", got)
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer test_key" {
 			t.Fatalf("expected authorization header, got %q", got)

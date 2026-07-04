@@ -157,7 +157,10 @@ type CreatePodRequest struct {
 
 	// GPU placement (ComputeType="GPU" or empty). GPUTypeIDs is a
 	// fallback-ordered list of acceptable GPU type IDs (e.g.,
-	// "NVIDIA GeForce RTX 4090"); RunPod picks the first available. Omit
+	// "NVIDIA GeForce RTX 4090"). CAUTION: RunPod's REST API does NOT
+	// reliably walk this list when the first type is out of stock — it can
+	// return 500 "no instances available" instead. Callers that need
+	// fallback behavior should submit one type per request. Omit
 	// these on CPU requests — `omitempty` is required because RunPod's REST
 	// validator rejects unknown/unexpected fields with `Extra input keys
 	// provided in request body`, and an explicit `gpuTypeIds: null` /

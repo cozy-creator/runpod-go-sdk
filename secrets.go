@@ -124,9 +124,3 @@ func (c *Client) validateCreateSecretRequest(req *CreateSecretRequest) error {
 
 	return nil
 }
-
-// Convenience Function matching my previous code (will be removed in the future)
-
-func (c *Client) CreateOrUpdateRunpodSecret(ctx context.Context, name, value string) error {
-	return c.CreateOrUpdateSecret(ctx, name, value)
-}
