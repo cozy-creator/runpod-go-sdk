@@ -1,3 +1,5 @@
+//go:build live
+
 package runpod_test
 
 import (

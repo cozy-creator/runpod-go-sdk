@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 
 	runpod "github.com/cozy-creator/runpod-go-sdk"
@@ -94,21 +93,5 @@ func TestIsRegistryAuthError(t *testing.T) {
 	err := &runpod.NoCapacityError{GPUTypeID: "A", Cause: errors.New("unauthorized")}
 	if runpod.IsRegistryAuthError(err) {
 		t.Error("capacity errors must never classify as registry-auth errors")
-	}
-}
-
-// TestContainerRegistryAuthsLive verifies the REST endpoint against the real API.
-func TestContainerRegistryAuthsLive(t *testing.T) {
-	apiKey := os.Getenv("RUNPOD_API_KEY")
-	if apiKey == "" {
-		t.Skip("live test: RUNPOD_API_KEY not set")
-	}
-	client := mustClient(t, apiKey)
-	auths, err := client.ListContainerRegistryAuths(context.Background())
-	if err != nil {
-		t.Fatalf("live list container registry auths: %v", err)
-	}
-	for _, a := range auths {
-		t.Logf("registry auth id=%s name=%s", a.ID, a.Name)
 	}
 }

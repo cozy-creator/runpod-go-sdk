@@ -36,8 +36,17 @@ func (c *Client) createPod(ctx context.Context, req *CreatePodRequest) (*Pod, er
 	return &pod, nil
 }
 
-// CreateSpotPod creates a new spot/interruptible pod instance.
-// The caller's request is not mutated.
+// CreateSpotPod creates a spot/interruptible pod. The caller's request is
+// not mutated. Set req.BidPerGPU to bid above the market floor (see
+// ListGPUOffers for current minimum bids); when zero RunPod bids the
+// current minimum.
+//
+// Reclaim semantics: when RunPod preempts a spot pod (outbid or capacity
+// reclaimed) the pod is stopped, not deleted — GetPod reports
+// desiredStatus="EXITED" with the runtime block cleared, exactly like a
+// container exit. There is no dedicated preemption signal or notice period
+// in the public API; poll pod status and treat an unexpected EXITED on an
+// interruptible pod as a probable reclaim.
 func (c *Client) CreateSpotPod(ctx context.Context, req *CreatePodRequest) (*Pod, error) {
 	if req == nil {
 		return nil, NewValidationError("request", "cannot be nil")
@@ -229,12 +238,15 @@ func (c *Client) validateCreatePodRequest(req *CreatePodRequest) error {
 		}
 	}
 
-	// Validate bid price for spot instances
-	// if req.BidPerGPU > 0 {
-	// 	if err := c.validatePositiveFloat("bidPerGpu", req.BidPerGPU); err != nil {
-	// 		return err
-	// 	}
-	// }
+	// Bid prices only make sense on interruptible (spot) pods.
+	if req.BidPerGPU != 0 {
+		if err := c.validatePositiveFloat("bidPerGpu", req.BidPerGPU); err != nil {
+			return err
+		}
+		if !req.Interruptible {
+			return NewValidationError("bidPerGpu", "requires interruptible=true (spot pods)")
+		}
+	}
 
 	// Validate cloud type
 	if req.CloudType != "" {

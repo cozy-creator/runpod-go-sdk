@@ -95,3 +95,52 @@ Audit 2026-07. The client core mostly works but has fossil edges:
 - [x] Error model collapse w/ sentinel `errors.Is` support
 - [x] Explicit serverless routing; kill URL sniffing
 - [x] `json.RawMessage` job payloads
+
+---
+
+# #7: One GPU catalog: SDK-owned SKU data (VRAM, SM capability, Blackwell)
+
+**Status:** DONE (2026-07-04)
+
+Shipped: `GPUSpec` catalog (23 SKUs, Ampere→Blackwell incl. RTX 5090 SM120, B200 SM100, RTX PRO 6000 Blackwell, H200) + `GPUCatalog()`/`GPUSpecByID()`/`GPUsWithAtLeast(vram, smMin)`/`GPUTypeIDs()` helpers, fallback-preference ordered. `defaultGPUTypeIDLadder`/`DefaultGPUTypeID` deleted. Live-gated `TestGPUCatalogIDsLive` verifies every ID against the real gpuTypes query. Tensorhub `gpu_selection.go` migration deferred to the tensorhub-tracker adoption issue.
+
+Audit 2026-07. GPU knowledge is split and diverging: the SDK has `defaultGPUTypeIDLadder` (id + VRAM only, no A40/A100-SXM4/H100-PCIe), tensorhub has `KnownGPUs` (id + VRAM + SM capability, no 3070/3080/4080). Both are static; neither knows B200/Blackwell datacenter SKUs. A Vast.ai-style sibling provider would need the same table again.
+
+The SDK should own one catalog: `GPUSpec{ID, DisplayName, VRAMGB, SMCapability, Consumer bool}` + `GPUCatalog()` + selection helpers (`GPUsWithAtLeast(vramGB, smMin)` fallback-ordered), refreshable from `ListGPUTypes` for stock/price. Include RTX 5090 (SM 120), B200, RTX 6000 Ada/Blackwell Pro as RunPod lists them.
+
+## Tasks
+- [x] Define catalog + selection helpers in SDK; delete `defaultGPUTypeIDLadder`/`DefaultGPUTypeID` in favor of them
+- [x] Verify type-ID strings against live `gpuTypes` query (RUNPOD_API_KEY-gated test)
+- [ ] (deferred to tensorhub tracker adoption issue) Migrate tensorhub `gpu_selection.go` onto the SDK catalog (keep policy — chain ordering — in the consumer or accept ordering as parameter)
+
+---
+
+# #8: Spot/interruptible + price-aware placement
+
+**Status:** DONE (2026-07-04)
+
+Shipped: `BidPerGPU` on CreatePodRequest (validated: positive + requires Interruptible; REST `bidPerGpu`), `ListGPUOffers` (GPU type x cloud offers via aliased per-cloud lowestPrice query, sorted by on-demand price; datacenter granularity documented as not exposed), spot-reclaim semantics documented on CreateSpotPod (preempted pods report desiredStatus=EXITED, runtime cleared; no dedicated signal). Live-gated `TestSpotPodReclaimLive` (extra RUNPOD_LIVE_SPOT=1 gate since it costs money) creates a bid spot pod, verifies Interruptible, terminates.
+
+Audit 2026-07. `CreateSpotPod` just flips `Interruptible` — there is no bid price (`BidPerGPU` exists only as a commented-out validation block), no spot-reclaim semantics, and no price-aware pod placement. `ListAvailableGPUs` already returns `minimumBidPrice`/`uninterruptablePrice` but nothing connects it to pod creation. Needed for cost-optimized autoscaling and for provider parity with a future Vast.ai sibling (offer/bid model).
+
+## Tasks
+- [x] `BidPerGPU` on CreatePodRequest, verified against REST (or documented as GraphQL-only w/ fallback)
+- [x] Surface interruptible price + stock in one "offers"-style query helper (GPU type x cloud x datacenter)
+- [x] Document/detect spot reclaim: what the API reports when a spot pod is preempted (desiredStatus/runtime transitions)
+- [x] Live-gated test creating + reclaim-polling a cheap spot pod
+
+---
+
+# #9: DX: fake RunPod server, one-command test story, README truthfulness
+
+**Status:** DONE (2026-07-04)
+
+Shipped: `runpodtest` package — in-process fake covering pods CRUD w/ per-GPU-type stock-out injection, network volumes, registry auths, job lifecycle (CompleteJob/FailJob controls), gpuTypes GraphQL, and one-shot 429/500 fault injection with Retry-After; exercised by its own e2e test suite. Test layout unified: `tests/` folded into the package root; live tests behind `//go:build live` + env gating (`go test ./...` = unit, `RUNPOD_API_KEY=... go test -tags live ./...` = integration; spot test extra-gated on RUNPOD_LIVE_SPOT=1). README rewritten truthfully with a REST/GraphQL capability matrix. Godoc pass done on all exported symbols.
+
+Audit 2026-07. Tests exist and are decent (mock httptest servers for jobs/gpu-types/diagnostics; validation unit tests) but consumers can't reuse any of it: every consumer builds its own mocks. And the README documents surface that doesn't exist or is slated for deletion.
+
+## Tasks
+- [x] `runpodtest` package: in-process fake implementing the endpoints the SDK covers (pods CRUD w/ stock-out injection, jobs lifecycle, 429/500 fault injection) for consumers to point a Client at
+- [x] Fold root-level `cpu_pods_test.go`/`pods_timing_test.go` and `tests/` into one layout; document `go test ./...` (unit) vs `RUNPOD_API_KEY=... go test -tags live` (integration)
+- [x] README audit: remove/rewrite sections describing deleted or never-implemented surface (endpoints/templates CRUD, pod logs); add a truthful capability matrix (REST vs GraphQL per resource)
+- [x] Godoc pass on exported symbols after #4/#6 deletions
