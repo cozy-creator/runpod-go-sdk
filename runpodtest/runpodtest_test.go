@@ -219,3 +219,24 @@ func TestGPUTypesQuery(t *testing.T) {
 		t.Fatal("expected offers from default catalog")
 	}
 }
+
+func TestGPUTypesQueryRejectsRemovedLowestPriceFields(t *testing.T) {
+	srv := runpodtest.New()
+	defer srv.Close()
+	client := srv.MustClient()
+	ctx := context.Background()
+
+	for _, field := range []string{"interruptablePrice", "cudaVersion"} {
+		query := `query { gpuTypes { id lowestPrice(input: { gpuCount: 1 }) { ` + field + ` } } }`
+		err := client.GraphQL(ctx, query, nil, nil)
+		if err == nil {
+			t.Fatalf("expected validation error for removed field %q", field)
+		}
+	}
+
+	// Word boundaries: uninterruptablePrice and minCudaVersion must still pass.
+	query := `query($minCudaVersion: String) { gpuTypes { id lowestPrice(input: { gpuCount: 1, minCudaVersion: $minCudaVersion }) { uninterruptablePrice } } }`
+	if err := client.GraphQL(ctx, query, map[string]interface{}{"minCudaVersion": "12.8"}, nil); err != nil {
+		t.Fatalf("valid query rejected: %v", err)
+	}
+}

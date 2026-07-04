@@ -18,11 +18,17 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync"
 
 	runpod "github.com/cozy-creator/runpod-go-sdk"
 )
+
+// removedLowestPriceField matches LowestPrice selections RunPod deleted from
+// its live schema (word-bounded so uninterruptablePrice / minCudaVersion
+// don't match).
+var removedLowestPriceField = regexp.MustCompile(`\b(interruptablePrice|cudaVersion)\b`)
 
 type fault struct {
 	status     int
@@ -552,6 +558,17 @@ func (s *Server) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	if !strings.Contains(req.Query, "gpuTypes") {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"errors": []map[string]string{{"message": "runpodtest: only gpuTypes queries are supported"}},
+		})
+		return
+	}
+	// RunPod removed these LowestPrice fields; reject them like the live API
+	// so schema drift fails unit tests too.
+	if m := removedLowestPriceField.FindString(req.Query); m != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"errors": []map[string]interface{}{{
+				"message":    fmt.Sprintf("Cannot query field %q on type \"LowestPrice\".", m),
+				"extensions": map[string]string{"code": "GRAPHQL_VALIDATION_FAILED"},
+			}},
 		})
 		return
 	}

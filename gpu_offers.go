@@ -20,11 +20,10 @@ type GPUOffer struct {
 	// OnDemandPrice is the uninterruptible USD/hr price.
 	OnDemandPrice float64
 	// MinimumBidPrice is the current spot-market floor (USD/hr per GPU);
-	// use it as CreatePodRequest.BidPerGPU guidance.
+	// use it as CreatePodRequest.BidPerGPU guidance. RunPod no longer
+	// reports a separate interruptible/spot price on LowestPrice — this
+	// floor is the only spot pricing signal exposed.
 	MinimumBidPrice float64
-	// InterruptiblePrice is the current spot USD/hr price, when reported.
-	InterruptiblePrice float64
-	CudaVersion        string
 }
 
 // GPUOfferFilter constrains ListGPUOffers. Zero value = all offers for one
@@ -85,16 +84,12 @@ query($gpuCount: Int!, $minCudaVersion: String) {
     secure: lowestPrice(input: { gpuCount: $gpuCount, minCudaVersion: $minCudaVersion, secureCloud: true }) {
       minimumBidPrice
       uninterruptablePrice
-      interruptablePrice
       stockStatus
-      cudaVersion
     }
     community: lowestPrice(input: { gpuCount: $gpuCount, minCudaVersion: $minCudaVersion, secureCloud: false }) {
       minimumBidPrice
       uninterruptablePrice
-      interruptablePrice
       stockStatus
-      cudaVersion
     }
   }
 }`
@@ -125,15 +120,13 @@ query($gpuCount: Int!, $minCudaVersion: String) {
 				return
 			}
 			offers = append(offers, GPUOffer{
-				GPUTypeID:          gpu.ID,
-				DisplayName:        gpu.DisplayName,
-				MemoryInGB:         gpu.MemoryInGB,
-				CloudType:          cloud,
-				StockStatus:        status,
-				OnDemandPrice:      price.UninterruptablePrice,
-				MinimumBidPrice:    price.MinimumBidPrice,
-				InterruptiblePrice: price.InterruptablePrice,
-				CudaVersion:        price.CudaVersion,
+				GPUTypeID:       gpu.ID,
+				DisplayName:     gpu.DisplayName,
+				MemoryInGB:      gpu.MemoryInGB,
+				CloudType:       cloud,
+				StockStatus:     status,
+				OnDemandPrice:   price.UninterruptablePrice,
+				MinimumBidPrice: price.MinimumBidPrice,
 			})
 		}
 		if gpu.SecureCloud {

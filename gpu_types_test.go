@@ -56,7 +56,6 @@ func TestListGPUTypes_Filtering(t *testing.T) {
 							"minimumBidPrice":      0.10,
 							"uninterruptablePrice": 0.49,
 							"stockStatus":          "AVAILABLE",
-							"cudaVersion":          "12.8",
 						},
 					},
 					{
@@ -69,7 +68,6 @@ func TestListGPUTypes_Filtering(t *testing.T) {
 							"minimumBidPrice":      1.10,
 							"uninterruptablePrice": 2.49,
 							"stockStatus":          "LOW",
-							"cudaVersion":          "12.8",
 						},
 					},
 					{

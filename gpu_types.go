@@ -37,9 +37,7 @@ query($gpuCount: Int!, $minCudaVersion: String, $allowedCudaVersions: [String!])
     lowestPrice(input: { gpuCount: $gpuCount, minCudaVersion: $minCudaVersion, allowedCudaVersions: $allowedCudaVersions }) {
       minimumBidPrice
       uninterruptablePrice
-      interruptablePrice
       stockStatus
-      cudaVersion
     }
   }
 }`
