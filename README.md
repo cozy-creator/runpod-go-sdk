@@ -117,6 +117,8 @@ pod, err := client.CreateSpotPod(ctx, &runpod.CreatePodRequest{
 })
 ```
 
+Spot pricing: RunPod removed `interruptablePrice` (and `cudaVersion`) from the `lowestPrice` GraphQL type; `MinimumBidPrice` — the spot bid floor — is the only spot pricing signal the API still exposes.
+
 Reclaim: a preempted spot pod is stopped, not deleted — it reports `desiredStatus="EXITED"` with the runtime cleared. There is no dedicated preemption signal in the public API; treat an unexpected EXITED on an interruptible pod as a probable reclaim. Datacenter-level offer granularity is not exposed by the `lowestPrice` query; constrain placement with `DataCenterIDs`.
 
 ## Serverless jobs

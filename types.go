@@ -292,13 +292,12 @@ type GPUType struct {
 }
 
 // Price is the pricing/stock block returned by the gpuTypes lowestPrice
-// query.
+// query. RunPod removed interruptablePrice and cudaVersion from LowestPrice;
+// MinimumBidPrice (the spot bid floor) is the only spot signal still exposed.
 type Price struct {
 	MinimumBidPrice      float64 `json:"minimumBidPrice"`
 	UninterruptablePrice float64 `json:"uninterruptablePrice"`
-	InterruptablePrice   float64 `json:"interruptablePrice,omitempty"`
 	StockStatus          string  `json:"stockStatus,omitempty"`
-	CudaVersion          string  `json:"cudaVersion,omitempty"`
 }
 
 // GPUTypeFilter constrains ListGPUTypes.
