@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 
 	runpod "github.com/cozy-creator/runpod-go-sdk"
@@ -109,24 +108,5 @@ func TestNetworkVolumeValidation(t *testing.T) {
 	}
 	if _, err := client.UpdateNetworkVolume(ctx, "", &runpod.UpdateNetworkVolumeRequest{Size: 10}); err == nil {
 		t.Fatal("empty volumeID must fail validation")
-	}
-}
-
-// TestNetworkVolumesLive verifies REST parity against the real API.
-func TestNetworkVolumesLive(t *testing.T) {
-	apiKey := os.Getenv("RUNPOD_API_KEY")
-	if apiKey == "" {
-		t.Skip("live test: RUNPOD_API_KEY not set")
-	}
-	client := mustClient(t, apiKey)
-	volumes, err := client.ListNetworkVolumes(context.Background())
-	if err != nil {
-		t.Fatalf("live list network volumes: %v", err)
-	}
-	for _, v := range volumes {
-		if v.ID == "" {
-			t.Fatalf("live volume with empty id: %+v", v)
-		}
-		t.Logf("volume id=%s name=%s size=%dGB dc=%s", v.ID, v.Name, v.Size, v.DataCenterID)
 	}
 }

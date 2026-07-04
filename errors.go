@@ -67,6 +67,7 @@ func NewAPIError(statusCode int, message string) *APIError {
 	}
 }
 
+// NewAPIErrorWithDetails creates an API error with a details string.
 func NewAPIErrorWithDetails(statusCode int, message, details string) *APIError {
 	return &APIError{
 		StatusCode: statusCode,
@@ -90,6 +91,7 @@ func (e *ValidationError) Error() string {
 	return fmt.Sprintf("validation error for field '%s': %s", e.Field, e.Message)
 }
 
+// NewValidationError creates a client-side validation error.
 func NewValidationError(field, message string) *ValidationError {
 	return &ValidationError{
 		Field:   field,
@@ -97,6 +99,8 @@ func NewValidationError(field, message string) *ValidationError {
 	}
 }
 
+// NewValidationErrorWithValue creates a validation error carrying the
+// offending value.
 func NewValidationErrorWithValue(field, message string, value interface{}) *ValidationError {
 	return &ValidationError{
 		Field:   field,

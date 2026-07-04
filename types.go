@@ -7,11 +7,14 @@ import (
 	"time"
 )
 
+// ListOptions paginates list endpoints.
 type ListOptions struct {
 	Limit  int `json:"limit,omitempty"`
 	Offset int `json:"offset,omitempty"`
 }
 
+// JSONTime wraps time.Time to tolerate RunPod's non-RFC-3339 timestamp
+// formats on unmarshal; it always marshals as RFC-3339.
 type JSONTime struct {
 	time.Time
 }
@@ -88,6 +91,7 @@ func (jt JSONTime) MarshalJSON() ([]byte, error) {
 	return json.Marshal(jt.Time.Format(time.RFC3339))
 }
 
+// Pod is a RunPod GPU or CPU pod.
 type Pod struct {
 	ID                string            `json:"id"`
 	Name              string            `json:"name"`
@@ -128,6 +132,8 @@ func (p *Pod) Status() string {
 	return p.DesiredStatus
 }
 
+// PodRuntime is the pod's live runtime block (present once the container
+// is up).
 type PodRuntime struct {
 	UptimeSeconds     int                    `json:"uptimeSeconds"`
 	LastStartedAt     string                 `json:"lastStartedAt"`
@@ -141,6 +147,7 @@ type PodRuntime struct {
 	ContainerExitCode int                    `json:"containerExitCode,omitempty"`
 }
 
+// Machine describes the host a pod landed on.
 type Machine struct {
 	ID           string `json:"id"`
 	Name         string `json:"name,omitempty"`
@@ -150,6 +157,7 @@ type Machine struct {
 	CountryCode  string `json:"countryCode,omitempty"`
 }
 
+// CreatePodRequest configures pod creation (REST POST /pods).
 type CreatePodRequest struct {
 	Name                    string `json:"name"`
 	ImageName               string `json:"imageName"`
@@ -191,9 +199,15 @@ type CreatePodRequest struct {
 	DockerArgs        string            `json:"dockerArgs,omitempty"`
 	NetworkVolumeID   string            `json:"networkVolumeId,omitempty"`
 	CloudType         string            `json:"cloudType,omitempty"`     // "SECURE" or "COMMUNITY"
-	Interruptible     bool              `json:"interruptible,omitempty"` // For spot instances
-	SupportPublicIP   bool              `json:"supportPublicIp,omitempty"`
-	TemplateID        string            `json:"templateId,omitempty"`
+	Interruptible     bool              `json:"interruptible,omitempty"` // spot/interruptible instance
+
+	// BidPerGPU is the per-GPU bid price (USD/hr) for interruptible pods.
+	// Only valid when Interruptible is true. When omitted RunPod uses the
+	// current minimum bid. Get the market floor from ListGPUOffers /
+	// ListAvailableGPUs (Price.MinimumBidPrice).
+	BidPerGPU       float64 `json:"bidPerGpu,omitempty"`
+	SupportPublicIP bool    `json:"supportPublicIp,omitempty"`
+	TemplateID      string  `json:"templateId,omitempty"`
 
 	AllowedCudaVersions []string `json:"allowedCudaVersions,omitempty"`
 	MinCudaVersion      string   `json:"minCudaVersion,omitempty"`
@@ -250,10 +264,12 @@ type Job struct {
 	EndpointID    string          `json:"endpointId,omitempty"`
 }
 
+// RunJobRequest wraps a serverless job input payload.
 type RunJobRequest struct {
 	Input interface{} `json:"input"`
 }
 
+// JobStatus enumerates serverless job states.
 type JobStatus string
 
 const (
@@ -265,6 +281,7 @@ const (
 	JobStatusTimedOut   JobStatus = "TIMED_OUT"
 )
 
+// GPUType is a GPU SKU from RunPod's live catalog (GraphQL gpuTypes).
 type GPUType struct {
 	ID             string `json:"id"`
 	DisplayName    string `json:"displayName"`
@@ -274,6 +291,8 @@ type GPUType struct {
 	LowestPrice    *Price `json:"lowestPrice,omitempty"`
 }
 
+// Price is the pricing/stock block returned by the gpuTypes lowestPrice
+// query.
 type Price struct {
 	MinimumBidPrice      float64 `json:"minimumBidPrice"`
 	UninterruptablePrice float64 `json:"uninterruptablePrice"`
@@ -282,6 +301,7 @@ type Price struct {
 	CudaVersion          string  `json:"cudaVersion,omitempty"`
 }
 
+// GPUTypeFilter constrains ListGPUTypes.
 type GPUTypeFilter struct {
 	IDs                 []string
 	MinCudaVersion      string
@@ -291,11 +311,13 @@ type GPUTypeFilter struct {
 	GPUCount            int
 }
 
+// GPUTypeWithAvailability is a GPU type with its current stock status.
 type GPUTypeWithAvailability struct {
 	GPUType
 	StockStatus string
 }
 
+// GetPodOptions toggles the include* query parameters on GetPodWithOptions.
 type GetPodOptions struct {
 	IncludeMachine       bool
 	IncludeNetworkVolume bool
@@ -304,6 +326,8 @@ type GetPodOptions struct {
 	IncludeWorkers       bool
 }
 
+// PodDiagnostics is a normalized snapshot for scheduler/bootstrap
+// troubleshooting.
 type PodDiagnostics struct {
 	PodID            string
 	DesiredStatus    string
@@ -318,6 +342,8 @@ type PodDiagnostics struct {
 	ProviderReason   string
 }
 
+// ProviderFeatureSupport reports the SDK's understanding of optional
+// provider capabilities.
 type ProviderFeatureSupport struct {
 	PodLogsAPI bool
 	Reason     string
@@ -333,6 +359,7 @@ type NetworkVolume struct {
 	PodIds       []string  `json:"podIds,omitempty"`
 }
 
+// CreateNetworkVolumeRequest configures network volume creation.
 type CreateNetworkVolumeRequest struct {
 	Name         string `json:"name"`
 	Size         int    `json:"size"` // GB
@@ -352,12 +379,14 @@ type ContainerRegistryAuth struct {
 	Name string `json:"name"`
 }
 
+// CreateContainerRegistryAuthRequest stores a new registry credential.
 type CreateContainerRegistryAuthRequest struct {
 	Name     string `json:"name"`
 	Username string `json:"username"`
 	Password string `json:"password"`
 }
 
+// EndpointHealth is a serverless endpoint's queue/worker health.
 type EndpointHealth struct {
 	Status        string `json:"status"`
 	JobsInQueue   int    `json:"jobsInQueue"`
@@ -366,17 +395,20 @@ type EndpointHealth struct {
 	WorkersTotal  int    `json:"workersTotal"`
 }
 
+// Secret is a stored secret (value never returned).
 type Secret struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	// Value is not returned for security reasons
 }
 
+// CreateSecretRequest creates a named secret.
 type CreateSecretRequest struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
 }
 
+// UpdateSecretRequest replaces a secret value.
 type UpdateSecretRequest struct {
 	Value string `json:"value"`
 }

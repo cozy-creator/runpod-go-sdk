@@ -230,28 +230,6 @@ func TestPodTimingSnapshot_OneShot(t *testing.T) {
 	}
 }
 
-func TestDefaultGPUTypeID_Ladder(t *testing.T) {
-	cases := []struct {
-		minVRAM  int
-		wantSubs string
-	}{
-		{0, "RTX 3070"},
-		{8, "RTX 3070"},
-		{10, "RTX 3080"},
-		{16, "RTX 4080"},
-		{24, "RTX 3090"},
-		{32, "RTX 5090"},
-		{80, "A100"},
-		{1000, "RTX 4090"}, // fallback when nothing fits
-	}
-	for _, tc := range cases {
-		got := DefaultGPUTypeID(tc.minVRAM)
-		if !strings.Contains(got, tc.wantSubs) {
-			t.Errorf("DefaultGPUTypeID(%d)=%q, want substring %q", tc.minVRAM, got, tc.wantSubs)
-		}
-	}
-}
-
 // Sanity check that the stub URL routing matches what the client actually
 // does — guards against pod path drift in the SDK.
 func TestStubServerHonorsPodPath(t *testing.T) {

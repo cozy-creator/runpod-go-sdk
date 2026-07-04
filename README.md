@@ -90,6 +90,35 @@ gpu, err := client.GetGPUType(ctx, "NVIDIA GeForce RTX 4090")
 
 `ListAvailableGPUs` returns `StockStatus` and `LowestPrice` (bid/on-demand) per type.
 
+### Static SKU catalog
+
+The SDK owns a static `GPUSpec` catalog (type ID, VRAM, SM compute capability, consumer flag) covering Ampere through Blackwell (RTX 5090, B200, RTX PRO 6000 Blackwell, H200, ...), ordered by fallback preference:
+
+```go
+specs := runpod.GPUsWithAtLeast(24, 89) // >=24GB VRAM, SM >= 8.9
+req.GPUTypeIDs = runpod.GPUTypeIDs(specs) // directly usable as a fallback chain
+spec, ok := runpod.GPUSpecByID("NVIDIA GeForce RTX 4090")
+```
+
+Static data is verified against the live `gpuTypes` query by a live-gated test; refresh stock/pricing at runtime with `ListAvailableGPUs` / `ListGPUOffers`.
+
+### Offers and spot (interruptible) pods
+
+`ListGPUOffers` returns per-(GPU type x cloud) stock and pricing in one call, sorted by on-demand price — the placement view that connects the catalog to pod creation:
+
+```go
+offers, _ := client.ListGPUOffers(ctx, &runpod.GPUOfferFilter{MinCudaVersion: "12.8", InStockOnly: true})
+offer := offers[0] // cheapest in stock
+pod, err := client.CreateSpotPod(ctx, &runpod.CreatePodRequest{
+    // ...
+    GPUTypeIDs: []string{offer.GPUTypeID},
+    CloudType:  offer.CloudType,
+    BidPerGPU:  offer.MinimumBidPrice, // USD/hr per GPU; omit to bid the floor
+})
+```
+
+Reclaim: a preempted spot pod is stopped, not deleted — it reports `desiredStatus="EXITED"` with the runtime cleared. There is no dedicated preemption signal in the public API; treat an unexpected EXITED on an interruptible pod as a probable reclaim. Datacenter-level offer granularity is not exposed by the `lowestPrice` query; constrain placement with `DataCenterIDs`.
+
 ## Serverless jobs
 
 | Function | Description |
@@ -134,6 +163,20 @@ err = client.DeleteContainerRegistryAuth(ctx, auth.ID)
 
 Secrets: `CreateSecret` / `GetSecret` / `UpdateSecret` / `CreateOrUpdateSecret` / `DeleteSecret` / `ListSecrets`.
 
+## Capability matrix
+
+| Resource | Transport | Coverage |
+|----------|-----------|----------|
+| Pods (CRUD, stop/resume, fallback, timing, diagnostics) | REST | Full |
+| Serverless jobs (run/runsync/status/cancel/retry/purge/health/stream) | REST (api.runpod.ai) | Full |
+| GPU types / availability / offers | GraphQL | Query only |
+| Network volumes | REST | Full CRUD |
+| Container registry auths | REST | Create/List/Delete |
+| Secrets | REST | Full CRUD |
+| Pod SSH diagnostics (`DiscoverSSHTarget`, `StreamPodCommand`) | GraphQL + system ssh | Dev/diagnostic only |
+| Pod logs | — | Not exposed by RunPod's public API |
+| Serverless endpoints / templates CRUD | — | Not implemented (no consumer) |
+
 ## Error handling
 
 Two error types plus sentinels:
@@ -156,8 +199,24 @@ case errors.Is(err, runpod.ErrNoCapacity):
 ## Testing
 
 ```bash
-go test ./...                          # unit tests (mock servers)
-RUNPOD_API_KEY=... go test ./...       # additionally runs live API tests
+go test ./...                                    # unit tests (mock servers, no credentials)
+RUNPOD_API_KEY=... go test -tags live ./...      # + live API integration tests
+```
+
+Live tests are excluded by the `live` build tag and additionally skip when `RUNPOD_API_KEY` is unset. The spot-pod live test creates a real (cheap) pod and is further gated on `RUNPOD_LIVE_SPOT=1`.
+
+### Fake server for consumers
+
+The `runpodtest` package is an in-process fake RunPod API — pods CRUD with per-GPU-type stock-out injection, network volumes, registry auths, the job lifecycle, gpuTypes queries, and one-shot 429/500 fault injection:
+
+```go
+srv := runpodtest.New()
+defer srv.Close()
+client := srv.MustClient()
+
+srv.SetGPUStockOut("NVIDIA GeForce RTX 4090", true)
+srv.FailNext(429, `{"error":"rate limited"}`, "1")
+srv.CompleteJob(endpointID, jobID, myOutput)
 ```
 
 ## License
