@@ -10,9 +10,21 @@ import (
 	"time"
 )
 
-// CreatePod creates a new RunPod instance
+// CreatePod creates a new RunPod instance.
+//
+// When req.GPUTypeIDs contains more than one entry, CreatePod fans out via
+// CreatePodWithFallback: RunPod's REST API does not walk the list itself and
+// returns 500 "no instances available" when the first type has no stock.
+// Stock-outs surface as errors matching errors.Is(err, ErrNoCapacity).
 func (c *Client) CreatePod(ctx context.Context, req *CreatePodRequest) (*Pod, error) {
-	// Validate required fields
+	if req != nil && len(req.GPUTypeIDs) > 1 {
+		return c.CreatePodWithFallback(ctx, req, req.GPUTypeIDs, nil)
+	}
+	return c.createPod(ctx, req)
+}
+
+// createPod performs a single POST /pods with no fan-out.
+func (c *Client) createPod(ctx context.Context, req *CreatePodRequest) (*Pod, error) {
 	if err := c.validateCreatePodRequest(req); err != nil {
 		return nil, err
 	}
@@ -20,7 +32,7 @@ func (c *Client) CreatePod(ctx context.Context, req *CreatePodRequest) (*Pod, er
 	var pod Pod
 	err := c.Post(ctx, "/pods", req, &pod)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create pod: %w", err)
+		return nil, fmt.Errorf("failed to create pod: %w", classifyCreatePodError(err, req))
 	}
 
 	return &pod, nil

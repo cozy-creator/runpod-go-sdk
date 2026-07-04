@@ -192,23 +192,6 @@ high
 
 ---
 
-# #3: SDK-owned pod-create fallback: per-GPU-type fan-out + typed stock-out errors
-
-**Status:** open
-
-Audit 2026-07 (greenfield verdict). tensorhub discovered (its issue #350) that RunPod's REST `POST /pods` does NOT walk `gpuTypeIds` when the first type has no stock — it returns 500 "no instances available". The consumer had to reimplement a per-type fan-out loop plus a per-release failure tracker (~100 lines in tensorhub `pod.go` + `pod_failure_tracker.go`). That is provider-protocol knowledge and belongs in the SDK, not in every consumer.
-
-Design: `CreatePodWithFallback(ctx, req, candidates []string) (*Pod, error)` (or make plain `CreatePod` do it when `len(GPUTypeIDs) > 1`): try candidates one at a time, classify each failure, return a typed `*NoCapacityError{GPUTypeID, DataCenterIDs}` per attempt and an aggregate error listing what was tried. Consumers then keep only policy (which candidates, failure memory), not protocol.
-
-## Tasks
-- [ ] Add typed `NoCapacityError` (detect RunPod's 500 "no instances available" / "no resources" bodies)
-- [ ] Implement per-type fan-out in the SDK with context-aware early exit
-- [ ] Optional pluggable `CandidateFilter` hook so callers can skip recently-failed types
-- [ ] Mock-server tests: first type 500s, second succeeds; all fail -> aggregate error
-- [ ] Migrate tensorhub's loop onto it and delete the consumer-side copy
-
----
-
 # #4: Delete dead/speculative API surface
 
 **Status:** open
@@ -230,26 +213,6 @@ Audit 2026-07. Large parts of the SDK are aspirational coverage that nothing cal
 - [ ] Delete the symbols above; `go build ./... && go test ./...`
 - [ ] Prune README sections for deleted surface
 - [ ] Re-check against tensorhub (only consumer) before each deletion
-
----
-
-# #5: Network-volume + container-registry-auth coverage (what the real consumer hand-rolls)
-
-**Status:** open
-
-Audit 2026-07. tensorhub hand-rolls, next to the SDK, its own HTTP plumbing for exactly the two resources the SDK lacks:
-
-- `registry_auth.go` (~415 lines): REST `POST/GET/DELETE /containerregistryauth` + its own restRequest helper, plus auth-failure heuristics (`IsRunpodRegistryAuthError` string matching)
-- `volume_manager.go` + `api.go`: GraphQL `myself { networkVolumes }` and `updateNetworkVolume` with a second, duplicate client type — the ONLY reason tensorhub still owns a GraphQL client
-
-RunPod's REST API now exposes network volumes (`GET/POST/PATCH/DELETE /networkvolumes`) and registry auths. Adding both lets tensorhub delete its local `Client` entirely and construct one `runpodsdk.Client`.
-
-## Tasks
-- [ ] `ListNetworkVolumes` / `CreateNetworkVolume` / `UpdateNetworkVolume` (resize) / `DeleteNetworkVolume` via REST; verify REST parity vs GraphQL fields (dataCenterId, size)
-- [ ] `CreateContainerRegistryAuth` / `ListContainerRegistryAuths` / `DeleteContainerRegistryAuth`
-- [ ] Typed detection for registry-auth pod-create failures (replace consumer string matching)
-- [ ] Mock-server tests + RUNPOD_API_KEY-gated live test
-- [ ] Migrate tensorhub off its local Client/GraphQLRequest and delete it
 
 ---
 

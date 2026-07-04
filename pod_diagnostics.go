@@ -53,8 +53,8 @@ func deriveDatacenterID(pod *Pod) string {
 	if pod.Machine != nil && strings.TrimSpace(pod.Machine.DataCenterID) != "" {
 		return strings.TrimSpace(pod.Machine.DataCenterID)
 	}
-	if pod.NetworkVolume != nil && strings.TrimSpace(pod.NetworkVolume.DatacenterID) != "" {
-		return strings.TrimSpace(pod.NetworkVolume.DatacenterID)
+	if pod.NetworkVolume != nil && strings.TrimSpace(pod.NetworkVolume.DataCenterID) != "" {
+		return strings.TrimSpace(pod.NetworkVolume.DataCenterID)
 	}
 	return ""
 }
