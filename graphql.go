@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
 	"strings"
 )
 
@@ -29,7 +28,10 @@ func (c *Client) GraphQL(ctx context.Context, query string, variables map[string
 		return NewValidationError("query", "cannot be empty")
 	}
 
-	endpoint := c.graphQLURLWithAPIKey()
+	endpoint := strings.TrimSpace(c.GraphQLBaseURL)
+	if endpoint == "" {
+		endpoint = DefaultGraphQLBaseURL
+	}
 	req := graphQLRequest{
 		Query:     query,
 		Variables: variables,
@@ -51,7 +53,7 @@ func (c *Client) GraphQL(ctx context.Context, query string, variables map[string
 	}
 
 	if resp.StatusCode >= 400 {
-		return c.parseErrorResponse(resp.StatusCode, body)
+		return c.parseErrorResponse(resp.StatusCode, resp.Header, body)
 	}
 
 	var envelope graphQLResponse
@@ -75,22 +77,4 @@ func (c *Client) GraphQL(ctx context.Context, query string, variables map[string
 		return fmt.Errorf("failed to unmarshal GraphQL data payload: %w", err)
 	}
 	return nil
-}
-
-func (c *Client) graphQLURLWithAPIKey() string {
-	base := strings.TrimSpace(c.GraphQLBaseURL)
-	if base == "" {
-		base = DefaultGraphQLBaseURL
-	}
-
-	u, err := url.Parse(base)
-	if err != nil {
-		return base
-	}
-	q := u.Query()
-	if q.Get("api_key") == "" {
-		q.Set("api_key", c.APIKey)
-		u.RawQuery = q.Encode()
-	}
-	return u.String()
 }

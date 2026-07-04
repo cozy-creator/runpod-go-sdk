@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -202,7 +203,7 @@ func (c *Client) makeRequest(ctx context.Context, method, endpoint string, body 
 		}
 
 		// Check if response indicates a retryable error
-		if c.isRetryableHTTPStatus(resp.StatusCode) && attempt < c.MaxRetryAttempts {
+		if c.isRetryableHTTPStatus(method, resp.StatusCode) && attempt < c.MaxRetryAttempts {
 			resp.Body.Close()
 			lastErr = fmt.Errorf("HTTP %d: retryable server error", resp.StatusCode)
 
@@ -301,7 +302,7 @@ func (c *Client) handleResponse(resp *http.Response, v interface{}) error {
 
 	// Handle error responses
 	if resp.StatusCode >= 400 {
-		return c.parseErrorResponse(resp.StatusCode, body)
+		return c.parseErrorResponse(resp.StatusCode, resp.Header, body)
 	}
 
 	// Parse successful response
@@ -315,7 +316,7 @@ func (c *Client) handleResponse(resp *http.Response, v interface{}) error {
 }
 
 // parseErrorResponse parses error responses from the API
-func (c *Client) parseErrorResponse(statusCode int, body []byte) error {
+func (c *Client) parseErrorResponse(statusCode int, header http.Header, body []byte) error {
 	// Try to parse as structured API error
 	var apiErr APIError
 	if err := json.Unmarshal(body, &apiErr); err == nil && apiErr.Message != "" {
@@ -351,8 +352,8 @@ func (c *Client) parseErrorResponse(statusCode int, body []byte) error {
 		return NewAPIError(404, "resource not found")
 	case 429:
 		retryAfter := "unknown"
-		if resp := c.getResponseHeader("Retry-After"); resp != "" {
-			retryAfter = resp + " seconds"
+		if v := header.Get("Retry-After"); v != "" {
+			retryAfter = v + " seconds"
 		}
 		return NewRateLimitError("rate limit exceeded", retryAfter)
 	case 500, 502, 503, 504:
@@ -361,13 +362,6 @@ func (c *Client) parseErrorResponse(statusCode int, body []byte) error {
 		// Fallback to raw response body
 		return NewAPIError(statusCode, string(body))
 	}
-}
-
-// getResponseHeader is a helper to get response headers (will be implemented later)
-func (c *Client) getResponseHeader(key string) string {
-	// This will be implemented to access response headers
-	// For now, return empty string
-	return ""
 }
 
 // isRetryableError determines if an error should trigger a retry
@@ -383,20 +377,27 @@ func (c *Client) isRetryableError(err error) bool {
 	}
 
 	// API errors with 5xx status codes are retryable
-	if apiErr, ok := err.(*APIError); ok {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
 		return apiErr.IsServerError()
 	}
 
 	return false
 }
 
-// isRetryableHTTPStatus determines if an HTTP status code should trigger a retry
-func (c *Client) isRetryableHTTPStatus(statusCode int) bool {
+// isRetryableHTTPStatus determines if an HTTP status code should trigger a
+// retry. 5xx responses are retried only for non-POST requests: POSTs are not
+// idempotent (retrying POST /pods or /v2/{id}/run can create duplicate pods
+// or jobs), and RunPod signals ordinary stock-outs as 500 "no instances
+// available" — retrying those only multiplies latency for the caller's own
+// fallback chain. 429 is safe to retry for any method since the request was
+// rejected before processing.
+func (c *Client) isRetryableHTTPStatus(method string, statusCode int) bool {
 	switch statusCode {
+	case 429:
+		return true
 	case 500, 502, 503, 504:
-		return true
-	case 429: // Rate limit - could be retryable with backoff
-		return true
+		return method != http.MethodPost
 	default:
 		return false
 	}

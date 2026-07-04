@@ -10,14 +10,14 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// loadEnv gates live tests on credentials being present: a plain
+// `go test ./...` without RUNPOD_API_KEY skips them instead of failing.
 func loadEnv(t *testing.T) (string, string) {
-	if err := godotenv.Load(); err != nil {
-		t.Fatalf("❌ .env load failed: %v", err)
-	}
+	_ = godotenv.Load()
 	apiKey := os.Getenv("RUNPOD_API_KEY")
 	endpointID := os.Getenv("RUNPOD_ENDPOINT_ID")
 	if apiKey == "" || endpointID == "" {
-		t.Fatal("RUNPOD_API_KEY or RUNPOD_ENDPOINT_ID missing")
+		t.Skip("live test: RUNPOD_API_KEY / RUNPOD_ENDPOINT_ID not set")
 	}
 	return apiKey, endpointID
 }

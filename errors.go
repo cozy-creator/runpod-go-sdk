@@ -1,6 +1,9 @@
 package runpod
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 type APIError struct {
 	StatusCode int    `json:"statusCode"`
@@ -14,7 +17,7 @@ func (e *APIError) Error() string {
 	if e.Code != "" {
 		return fmt.Sprintf("RunPod API Error %d (%s): %s - %s", e.StatusCode, e.Code, e.Message, e.Details)
 	}
-	return fmt.Sprintf("RunPod API Error %d (%s): %s", e.StatusCode, e.Code, e.Message)
+	return fmt.Sprintf("RunPod API Error %d: %s", e.StatusCode, e.Message)
 }
 
 func (e *APIError) IsNotFound() bool {
@@ -204,42 +207,42 @@ func NewCapabilityNotAvailableError(feature, reason string) *CapabilityNotAvaila
 
 // IsAPIError checks if an error is an APIError
 func IsAPIError(err error) bool {
-	_, ok := err.(*APIError)
-	return ok
+	var target *APIError
+	return errors.As(err, &target)
 }
 
 // IsValidationError checks if an error is a ValidationError
 func IsValidationError(err error) bool {
-	_, ok := err.(*ValidationError)
-	return ok
+	var target *ValidationError
+	return errors.As(err, &target)
 }
 
 // IsNetworkError checks if an error is a NetworkError
 func IsNetworkError(err error) bool {
-	_, ok := err.(*NetworkError)
-	return ok
+	var target *NetworkError
+	return errors.As(err, &target)
 }
 
 // IsTimeoutError checks if an error is a TimeoutError
 func IsTimeoutError(err error) bool {
-	_, ok := err.(*TimeoutError)
-	return ok
+	var target *TimeoutError
+	return errors.As(err, &target)
 }
 
 // IsAuthError checks if an error is an AuthError
 func IsAuthError(err error) bool {
-	_, ok := err.(*AuthError)
-	return ok
+	var target *AuthError
+	return errors.As(err, &target)
 }
 
 // IsRateLimitError checks if an error is a RateLimitError
 func IsRateLimitError(err error) bool {
-	_, ok := err.(*RateLimitError)
-	return ok
+	var target *RateLimitError
+	return errors.As(err, &target)
 }
 
 // IsCapabilityNotAvailable checks if an error is a CapabilityNotAvailableError.
 func IsCapabilityNotAvailable(err error) bool {
-	_, ok := err.(*CapabilityNotAvailableError)
-	return ok
+	var target *CapabilityNotAvailableError
+	return errors.As(err, &target)
 }
