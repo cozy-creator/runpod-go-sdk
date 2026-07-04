@@ -3,11 +3,9 @@ package runpod
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/url"
 	"strings"
-	"time"
 )
 
 // CreatePod creates a new RunPod instance.
@@ -170,119 +168,6 @@ func (c *Client) TerminatePod(ctx context.Context, podID string) error {
 	}
 
 	return nil
-}
-
-// GetPodLogs retrieves logs for a pod.
-// Deprecated: RunPod public APIs do not reliably expose pod logs.
-// This method maps a route-not-found response into ErrCapabilityNotAvailable.
-func (c *Client) GetPodLogs(ctx context.Context, podID string) (string, error) {
-	if err := c.validateRequired("podID", podID); err != nil {
-		return "", err
-	}
-
-	var response struct {
-		Logs string `json:"logs"`
-	}
-
-	endpoint := fmt.Sprintf("/pods/%s/logs", podID)
-	err := c.Get(ctx, endpoint, &response)
-	if err != nil {
-		var apiErr *APIError
-		if errors.As(err, &apiErr) && apiErr.StatusCode == 404 {
-			return "", NewCapabilityNotAvailableError("pod_logs_api", "RunPod public API does not expose /pods/{id}/logs")
-		}
-		return "", fmt.Errorf("failed to get logs for pod %s: %w", podID, err)
-	}
-
-	return response.Logs, nil
-}
-
-// GetPodStatus gets just the status of a pod (lighter than GetPod)
-func (c *Client) GetPodStatus(ctx context.Context, podID string) (string, error) {
-	pod, err := c.GetPod(ctx, podID)
-	if err != nil {
-		return "", err
-	}
-	return pod.Status(), nil
-}
-
-// WaitForPodStatus waits for a pod to reach a specific status
-func (c *Client) WaitForPodStatus(ctx context.Context, podID string, targetStatus string, maxAttempts int) (*Pod, error) {
-	if maxAttempts <= 0 {
-		maxAttempts = 30 // Default max attempts
-	}
-
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		pod, err := c.GetPod(ctx, podID)
-		if err != nil {
-			return nil, err
-		}
-
-		if strings.ToUpper(pod.Status()) == strings.ToUpper(targetStatus) {
-			return pod, nil
-		}
-
-		// Check if pod is in a terminal error state
-		if c.isPodInErrorState(pod.Status()) {
-			return pod, fmt.Errorf("pod %s is in error state: %s", podID, pod.Status())
-		}
-
-		// Wait before next check
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(5 * time.Second):
-			// Continue to next attempt
-		}
-	}
-
-	return nil, fmt.Errorf("pod %s did not reach status %s after %d attempts", podID, targetStatus, maxAttempts)
-}
-
-// ListPodsByStatus lists pods filtered by status
-func (c *Client) ListPodsByStatus(ctx context.Context, status string, opts *ListOptions) ([]*Pod, error) {
-	pods, err := c.ListPods(ctx, opts)
-	if err != nil {
-		return nil, err
-	}
-
-	var filteredPods []*Pod
-	for _, pod := range pods {
-		if strings.ToUpper(pod.Status()) == strings.ToUpper(status) {
-			filteredPods = append(filteredPods, pod)
-		}
-	}
-
-	return filteredPods, nil
-}
-
-// ListRunningPods lists all currently running pods
-func (c *Client) ListRunningPods(ctx context.Context, opts *ListOptions) ([]*Pod, error) {
-	return c.ListPodsByStatus(ctx, "RUNNING", opts)
-}
-
-// ListStoppedPods lists all stopped pods
-func (c *Client) ListStoppedPods(ctx context.Context, opts *ListOptions) ([]*Pod, error) {
-	return c.ListPodsByStatus(ctx, "STOPPED", opts)
-}
-
-// FindPodByName finds a pod by its name
-func (c *Client) FindPodByName(ctx context.Context, name string) (*Pod, error) {
-	pods, err := c.ListPods(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, pod := range pods {
-		if pod.Name == name {
-			return pod, nil
-		}
-	}
-
-	return nil, &APIError{
-		StatusCode: 404,
-		Message:    fmt.Sprintf("pod with name '%s' not found", name),
-	}
 }
 
 // validateCreatePodRequest validates a pod creation request. The GPU-only

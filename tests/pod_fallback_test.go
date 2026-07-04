@@ -58,8 +58,9 @@ func newFallbackServer(t *testing.T, responses map[string]int, body string) (*ht
 	}
 }
 
-func fallbackClient(url string) *runpod.Client {
-	return runpod.NewClient("test_key",
+func fallbackClient(t *testing.T, url string) *runpod.Client {
+	t.Helper()
+	return mustClient(t, "test_key",
 		runpod.WithBaseURL(url),
 		runpod.WithMaxRetryAttempts(0),
 		runpod.WithRetryDelay(time.Millisecond),
@@ -82,7 +83,7 @@ func TestFallback_FirstStockOutSecondSucceeds(t *testing.T) {
 		`{"error":"no instances available"}`)
 	defer server.Close()
 
-	pod, err := fallbackClient(server.URL).CreatePod(context.Background(), baseGPURequest("A", "B"))
+	pod, err := fallbackClient(t, server.URL).CreatePod(context.Background(), baseGPURequest("A", "B"))
 	if err != nil {
 		t.Fatalf("expected success on second candidate, got %v", err)
 	}
@@ -100,7 +101,7 @@ func TestFallback_AllStockOut(t *testing.T) {
 		`{"error":"no instances available"}`)
 	defer server.Close()
 
-	_, err := fallbackClient(server.URL).CreatePod(context.Background(), baseGPURequest("A", "B"))
+	_, err := fallbackClient(t, server.URL).CreatePod(context.Background(), baseGPURequest("A", "B"))
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -129,7 +130,7 @@ func TestFallback_AbortsOnClientError(t *testing.T) {
 		`{"error":"invalid request"}`)
 	defer server.Close()
 
-	_, err := fallbackClient(server.URL).CreatePod(context.Background(), baseGPURequest("A", "B"))
+	_, err := fallbackClient(t, server.URL).CreatePod(context.Background(), baseGPURequest("A", "B"))
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -149,7 +150,7 @@ func TestFallback_SingleTypeNoCapacityTyped(t *testing.T) {
 
 	req := baseGPURequest("A")
 	req.DataCenterIDs = []string{"EU-RO-1"}
-	_, err := fallbackClient(server.URL).CreatePod(context.Background(), req)
+	_, err := fallbackClient(t, server.URL).CreatePod(context.Background(), req)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -171,7 +172,7 @@ func TestFallback_PlainServerErrorNotCapacityButContinues(t *testing.T) {
 		`{"error":"bad gateway"}`)
 	defer server.Close()
 
-	pod, err := fallbackClient(server.URL).CreatePod(context.Background(), baseGPURequest("A", "B"))
+	pod, err := fallbackClient(t, server.URL).CreatePod(context.Background(), baseGPURequest("A", "B"))
 	if err != nil {
 		t.Fatalf("5xx on first candidate should continue fan-out, got %v", err)
 	}
@@ -206,7 +207,7 @@ func TestFallback_CandidateFilterAndFailureHook(t *testing.T) {
 		},
 	}
 
-	client := fallbackClient(server.URL)
+	client := fallbackClient(t, server.URL)
 	pod, err := client.CreatePodWithFallback(context.Background(), baseGPURequest("A", "B", "C"), nil, opts)
 	if err != nil {
 		t.Fatalf("expected success, got %v", err)
@@ -229,7 +230,7 @@ func TestFallback_ContextCancelledEarlyExit(t *testing.T) {
 	defer server.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	client := runpod.NewClient("test_key",
+	client := mustClient(t, "test_key",
 		runpod.WithBaseURL(server.URL),
 		runpod.WithMaxRetryAttempts(0),
 		runpod.WithHTTPClient(&http.Client{

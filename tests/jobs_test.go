@@ -3,10 +3,10 @@ package runpod_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -46,7 +46,7 @@ func createJobTestServer() *httptest.Server {
 		case method == "POST" && strings.Contains(path, "/runsync"):
 			endpointID := extractEndpointID(path, "/runsync")
 			mockJob := createMockJob("job-sync-456", "COMPLETED", endpointID)
-			mockJob.Output = map[string]interface{}{"result": "Hello World"}
+			mockJob.Output = json.RawMessage(`{"result":"Hello World"}`)
 			json.NewEncoder(w).Encode(mockJob)
 
 		// Get job status: GET /v2/{endpoint_id}/status/{job_id}
@@ -72,7 +72,7 @@ func createJobTestServer() *httptest.Server {
 
 				mockJob := createMockJob(jobID, status, endpointID)
 				if status == "COMPLETED" {
-					mockJob.Output = map[string]interface{}{"result": "success"}
+					mockJob.Output = json.RawMessage(`{"result":"success"}`)
 				} else if status == "FAILED" {
 					mockJob.Error = "Job processing failed"
 				}
@@ -123,10 +123,7 @@ func createJobTestServer() *httptest.Server {
 				mockJob := createMockJob(jobID, "IN_PROGRESS", endpointID)
 
 				// Add some output to simulate streaming
-				mockJob.Output = map[string]interface{}{
-					"progress": "50%",
-					"status":   "processing",
-				}
+				mockJob.Output = json.RawMessage(`{"progress":"50%","status":"processing"}`)
 
 				// Add a small delay to simulate real-world behavior
 				time.Sleep(100 * time.Millisecond)
@@ -156,7 +153,7 @@ func createMockJob(jobID, status, endpointID string) *runpod.Job {
 	job := &runpod.Job{
 		ID:         jobID,
 		Status:     status,
-		Input:      map[string]interface{}{"test": "input"},
+		Input:      json.RawMessage(`{"test":"input"}`),
 		CreatedAt:  &runpod.JSONTime{Time: now},
 		EndpointID: endpointID,
 	}
@@ -181,7 +178,7 @@ func TestRunAsync(t *testing.T) {
 	server := createJobTestServer()
 	defer server.Close()
 
-	client := runpod.NewClient("test_key", runpod.WithServerlessBaseURL(server.URL))
+	client := mustClient(t, "test_key", runpod.WithServerlessBaseURL(server.URL))
 	ctx := context.Background()
 
 	tests := []struct {
@@ -237,7 +234,7 @@ func TestRunSync(t *testing.T) {
 	server := createJobTestServer()
 	defer server.Close()
 
-	client := runpod.NewClient("test_key", runpod.WithServerlessBaseURL(server.URL))
+	client := mustClient(t, "test_key", runpod.WithServerlessBaseURL(server.URL))
 	ctx := context.Background()
 
 	job, err := client.RunSync(ctx, "endpoint-123", map[string]string{"prompt": "test"})
@@ -254,8 +251,11 @@ func TestRunSync(t *testing.T) {
 		t.Errorf("RunSync() job status = %v, want COMPLETED", job.Status)
 	}
 
-	if job.Output == nil {
-		t.Errorf("RunSync() job output is nil, expected result")
+	var out struct {
+		Result string `json:"result"`
+	}
+	if err := json.Unmarshal(job.Output, &out); err != nil || out.Result != "Hello World" {
+		t.Errorf("RunSync() output = %s, want result=Hello World", string(job.Output))
 	}
 }
 
@@ -263,7 +263,7 @@ func TestGetJobStatus(t *testing.T) {
 	server := createJobTestServer()
 	defer server.Close()
 
-	client := runpod.NewClient("test_key", runpod.WithServerlessBaseURL(server.URL))
+	client := mustClient(t, "test_key", runpod.WithServerlessBaseURL(server.URL))
 	ctx := context.Background()
 
 	tests := []struct {
@@ -339,7 +339,7 @@ func TestCancelJob(t *testing.T) {
 	server := createJobTestServer()
 	defer server.Close()
 
-	client := runpod.NewClient("test_key", runpod.WithServerlessBaseURL(server.URL))
+	client := mustClient(t, "test_key", runpod.WithServerlessBaseURL(server.URL))
 	ctx := context.Background()
 
 	err := client.CancelJob(ctx, "endpoint-123", "job-456")
@@ -352,7 +352,7 @@ func TestRetryJob(t *testing.T) {
 	server := createJobTestServer()
 	defer server.Close()
 
-	client := runpod.NewClient("test_key", runpod.WithServerlessBaseURL(server.URL))
+	client := mustClient(t, "test_key", runpod.WithServerlessBaseURL(server.URL))
 	ctx := context.Background()
 
 	job, err := client.RetryJob(ctx, "endpoint-123", "job-failed")
@@ -375,7 +375,7 @@ func TestPurgeQueue(t *testing.T) {
 	server := createJobTestServer()
 	defer server.Close()
 
-	client := runpod.NewClient("test_key", runpod.WithServerlessBaseURL(server.URL))
+	client := mustClient(t, "test_key", runpod.WithServerlessBaseURL(server.URL))
 	ctx := context.Background()
 
 	err := client.PurgeQueue(ctx, "endpoint-123")
@@ -388,7 +388,7 @@ func TestGetHealth(t *testing.T) {
 	server := createJobTestServer()
 	defer server.Close()
 
-	client := runpod.NewClient("test_key", runpod.WithServerlessBaseURL(server.URL))
+	client := mustClient(t, "test_key", runpod.WithServerlessBaseURL(server.URL))
 	ctx := context.Background()
 
 	health, err := client.GetHealth(ctx, "endpoint-123")
@@ -411,7 +411,7 @@ func TestGetHealth(t *testing.T) {
 }
 
 func TestIsJobTerminal(t *testing.T) {
-	client := runpod.NewClient("test_key")
+	client := mustClient(t, "test_key")
 
 	tests := []struct {
 		name     string
@@ -440,7 +440,7 @@ func TestWaitForJobCompletion(t *testing.T) {
 	server := createJobTestServer()
 	defer server.Close()
 
-	client := runpod.NewClient("test_key", runpod.WithServerlessBaseURL(server.URL))
+	client := mustClient(t, "test_key", runpod.WithServerlessBaseURL(server.URL))
 	ctx := context.Background()
 
 	// Test with completed job
@@ -461,41 +461,11 @@ func TestWaitForJobCompletion(t *testing.T) {
 	}
 }
 
-func TestSubmitMultipleJobs(t *testing.T) {
-	server := createJobTestServer()
-	defer server.Close()
-
-	client := runpod.NewClient("test_key", runpod.WithServerlessBaseURL(server.URL))
-	ctx := context.Background()
-
-	inputs := []interface{}{
-		map[string]string{"prompt": "cat"},
-		map[string]string{"prompt": "dog"},
-		map[string]string{"prompt": "bird"},
-	}
-
-	jobs, err := client.SubmitMultipleJobs(ctx, "endpoint-123", inputs)
-	if err != nil {
-		t.Errorf("SubmitMultipleJobs() error = %v", err)
-		return
-	}
-
-	if len(jobs) != 3 {
-		t.Errorf("SubmitMultipleJobs() returned %d jobs, want 3", len(jobs))
-	}
-
-	for i, job := range jobs {
-		if job.ID != "job-async-123" {
-			t.Errorf("SubmitMultipleJobs() job %d ID = %v, want job-async-123", i, job.ID)
-		}
-	}
-}
-
 func TestRunAndWait(t *testing.T) {
 	server := createJobTestServer()
 	defer server.Close()
 
-	client := runpod.NewClient("test_key", runpod.WithServerlessBaseURL(server.URL))
+	client := mustClient(t, "test_key", runpod.WithServerlessBaseURL(server.URL))
 	ctx := context.Background()
 
 	// Since our mock server always returns completed jobs for specific IDs,
@@ -515,25 +485,6 @@ func TestRunAndWait(t *testing.T) {
 	}
 }
 
-func TestQuickRun(t *testing.T) {
-	server := createJobTestServer()
-	defer server.Close()
-
-	client := runpod.NewClient("test_key", runpod.WithServerlessBaseURL(server.URL))
-	ctx := context.Background()
-
-	job, err := client.QuickRun(ctx, "endpoint-123", map[string]string{"test": "input"})
-	if err != nil {
-		t.Errorf("QuickRun() error = %v", err)
-		return
-	}
-
-	// QuickRun tries sync first, which should succeed with our mock
-	if job.Status != "COMPLETED" {
-		t.Errorf("QuickRun() status = %v, want COMPLETED", job.Status)
-	}
-}
-
 // ================================
 // STREAMING TESTS
 // ================================
@@ -542,7 +493,7 @@ func TestStreamResults(t *testing.T) {
 	server := createJobTestServer()
 	defer server.Close()
 
-	client := runpod.NewClient("test_key", runpod.WithServerlessBaseURL(server.URL))
+	client := mustClient(t, "test_key", runpod.WithServerlessBaseURL(server.URL))
 	ctx := context.Background()
 
 	// Test simple streaming (single call)
@@ -566,50 +517,12 @@ func TestStreamResults(t *testing.T) {
 	}
 }
 
-func TestStreamResultsContinuous(t *testing.T) {
-	server := createJobTestServer()
-	defer server.Close()
-
-	client := runpod.NewClient("test_key", runpod.WithServerlessBaseURL(server.URL))
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	jobChan, errChan := client.StreamResultsContinuous(ctx, "endpoint-123", "job-running", 500*time.Millisecond)
-
-	// Test that we receive at least one update
-	select {
-	case job := <-jobChan:
-		if job == nil {
-			t.Errorf("StreamResultsContinuous() received nil job")
-			return
-		}
-		if job.ID != "job-running" {
-			t.Errorf("StreamResultsContinuous() job ID = %v, want job-running", job.ID)
-		}
-		if job.Status != "IN_PROGRESS" {
-			t.Errorf("StreamResultsContinuous() status = %v, want IN_PROGRESS", job.Status)
-		}
-		// Verify we got the expected output
-		if output, ok := job.Output.(map[string]interface{}); ok {
-			if progress, exists := output["progress"]; !exists || progress != "50%" {
-				t.Errorf("StreamResultsContinuous() unexpected progress: %v", progress)
-			}
-		} else {
-			t.Errorf("StreamResultsContinuous() unexpected output type: %T", job.Output)
-		}
-	case err := <-errChan:
-		t.Errorf("StreamResultsContinuous() error = %v", err)
-	case <-time.After(2 * time.Second):
-		t.Errorf("StreamResultsContinuous() timed out waiting for job update")
-	}
-}
-
 // ================================
 // ERROR HANDLING TESTS
 // ================================
 
 func TestJobValidation(t *testing.T) {
-	client := runpod.NewClient("test_key")
+	client := mustClient(t, "test_key")
 	ctx := context.Background()
 
 	// Test empty endpoint ID
@@ -623,135 +536,6 @@ func TestJobValidation(t *testing.T) {
 	if err == nil {
 		t.Errorf("GetJobStatus() with empty job ID should return error")
 	}
-
-	// Test empty inputs for multiple jobs
-	_, err = client.SubmitMultipleJobs(ctx, "endpoint-123", []interface{}{})
-	if err == nil {
-		t.Errorf("SubmitMultipleJobs() with empty inputs should return error")
-	}
-}
-
-func TestCompareOutputs(t *testing.T) {
-	tests := []struct {
-		name     string
-		a        interface{}
-		b        interface{}
-		expected bool
-	}{
-		{
-			name:     "both nil",
-			a:        nil,
-			b:        nil,
-			expected: true,
-		},
-		{
-			name:     "one nil",
-			a:        nil,
-			b:        "test",
-			expected: false,
-		},
-		{
-			name:     "same strings",
-			a:        "hello",
-			b:        "hello",
-			expected: true,
-		},
-		{
-			name:     "different strings",
-			a:        "hello",
-			b:        "world",
-			expected: false,
-		},
-		{
-			name:     "same numbers",
-			a:        42,
-			b:        42,
-			expected: true,
-		},
-		{
-			name:     "number vs string",
-			a:        42,
-			b:        "42",
-			expected: false,
-		},
-		{
-			name: "same maps",
-			a: map[string]interface{}{
-				"text":  "hello world",
-				"score": 95,
-			},
-			b: map[string]interface{}{
-				"text":  "hello world",
-				"score": 95,
-			},
-			expected: true,
-		},
-		{
-			name: "different maps",
-			a: map[string]interface{}{
-				"text":  "hello world",
-				"score": 95,
-			},
-			b: map[string]interface{}{
-				"text":  "hello world",
-				"score": 96, // Different score
-			},
-			expected: false,
-		},
-		{
-			name: "complex nested structures",
-			a: map[string]interface{}{
-				"results": []map[string]int{
-					{"score": 95, "confidence": 88},
-					{"score": 87, "confidence": 92},
-				},
-				"metadata": map[string]string{"model": "v2.1"},
-			},
-			b: map[string]interface{}{
-				"results": []map[string]int{
-					{"score": 95, "confidence": 88},
-					{"score": 87, "confidence": 92},
-				},
-				"metadata": map[string]string{"model": "v2.1"},
-			},
-			expected: true,
-		},
-		{
-			name: "complex nested structures - different",
-			a: map[string]interface{}{
-				"results": []map[string]int{
-					{"score": 95, "confidence": 88},
-					{"score": 87, "confidence": 92},
-				},
-				"metadata": map[string]string{"model": "v2.1"},
-			},
-			b: map[string]interface{}{
-				"results": []map[string]int{
-					{"score": 95, "confidence": 88},
-					{"score": 87, "confidence": 93}, // Different confidence
-				},
-				"metadata": map[string]string{"model": "v2.1"},
-			},
-			expected: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Since compareOutputs is not exported, we test the logic directly
-			// using reflect.DeepEqual which is what the function uses
-			result := compareOutputsTest(tt.a, tt.b)
-			if result != tt.expected {
-				t.Errorf("compareOutputs(%v, %v) = %v, want %v", tt.a, tt.b, result, tt.expected)
-			}
-		})
-	}
-}
-
-// Helper function to test compareOutputs logic since it's not exported
-func compareOutputsTest(a, b interface{}) bool {
-	// This mirrors the exact logic in the compareOutputs function
-	return reflect.DeepEqual(a, b)
 }
 
 func TestUnauthorizedJobOperations(t *testing.T) {
@@ -759,7 +543,7 @@ func TestUnauthorizedJobOperations(t *testing.T) {
 	defer server.Close()
 
 	// Client with wrong API key
-	client := runpod.NewClient("wrong_key", runpod.WithServerlessBaseURL(server.URL))
+	client := mustClient(t, "wrong_key", runpod.WithServerlessBaseURL(server.URL))
 	ctx := context.Background()
 
 	_, err := client.RunAsync(ctx, "endpoint-123", map[string]string{"test": "input"})
@@ -767,10 +551,7 @@ func TestUnauthorizedJobOperations(t *testing.T) {
 		t.Errorf("RunAsync() with wrong API key should return error")
 	}
 
-	// Check if it's an auth error
-	if apiErr, ok := err.(*runpod.APIError); ok {
-		if !apiErr.IsUnauthorized() {
-			t.Errorf("Expected unauthorized error, got: %v", err)
-		}
+	if !errors.Is(err, runpod.ErrUnauthorized) {
+		t.Errorf("Expected ErrUnauthorized, got: %v", err)
 	}
 }

@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cozy-creator/runpod-go-sdk"
 	"github.com/joho/godotenv"
 )
 
@@ -24,7 +23,7 @@ func loadEnv(t *testing.T) (string, string) {
 
 func TestRunSyncLive(t *testing.T) {
 	apiKey, endpointID := loadEnv(t)
-	client := runpod.NewClient(apiKey)
+	client := mustClient(t, apiKey)
 	ctx := context.Background()
 
 	job, err := client.RunSync(ctx, endpointID, map[string]interface{}{
@@ -38,7 +37,7 @@ func TestRunSyncLive(t *testing.T) {
 
 func TestRunAsyncStatusCancelRetryLive(t *testing.T) {
 	apiKey, endpointID := loadEnv(t)
-	client := runpod.NewClient(apiKey)
+	client := mustClient(t, apiKey)
 	ctx := context.Background()
 
 	job, err := client.RunAsync(ctx, endpointID, map[string]interface{}{
@@ -76,7 +75,7 @@ func TestRunAsyncStatusCancelRetryLive(t *testing.T) {
 
 func TestGetHealthLive(t *testing.T) {
 	apiKey, endpointID := loadEnv(t)
-	client := runpod.NewClient(apiKey)
+	client := mustClient(t, apiKey)
 	ctx := context.Background()
 
 	health, err := client.GetHealth(ctx, endpointID)
@@ -88,7 +87,7 @@ func TestGetHealthLive(t *testing.T) {
 
 func TestStreamAndWaitForJobCompletion(t *testing.T) {
 	apiKey, endpointID := loadEnv(t)
-	client := runpod.NewClient(apiKey)
+	client := mustClient(t, apiKey)
 	ctx := context.Background()
 
 	job, err := client.RunAsync(ctx, endpointID, map[string]interface{}{
@@ -106,9 +105,9 @@ func TestStreamAndWaitForJobCompletion(t *testing.T) {
 	t.Logf("✅ Final Output: %v", final.Output)
 }
 
-func TestSubmitMultipleAndPurgeLive(t *testing.T) {
+func TestSubmitAndPurgeLive(t *testing.T) {
 	apiKey, endpointID := loadEnv(t)
-	client := runpod.NewClient(apiKey)
+	client := mustClient(t, apiKey)
 	ctx := context.Background()
 
 	inputs := []interface{}{
@@ -116,14 +115,16 @@ func TestSubmitMultipleAndPurgeLive(t *testing.T) {
 		map[string]interface{}{"prompt": "Fact about Kenya"},
 		map[string]interface{}{"prompt": "Fact about Ghana"},
 	}
-	jobs, err := client.SubmitMultipleJobs(ctx, endpointID, inputs)
-	if err != nil {
-		t.Fatalf("SubmitMultipleJobs failed: %v", err)
+	for i, input := range inputs {
+		job, err := client.RunAsync(ctx, endpointID, input)
+		if err != nil {
+			t.Fatalf("RunAsync %d failed: %v", i, err)
+		}
+		t.Logf("🎯 Job submitted: %s", job.ID)
 	}
-	t.Logf("🎯 Jobs submitted: %d", len(jobs))
 
 	time.Sleep(3 * time.Second)
-	err = client.PurgeQueue(ctx, endpointID)
+	err := client.PurgeQueue(ctx, endpointID)
 	if err != nil {
 		t.Errorf("PurgeQueue failed: %v", err)
 	} else {
@@ -131,22 +132,8 @@ func TestSubmitMultipleAndPurgeLive(t *testing.T) {
 	}
 }
 
-func TestQuickRunLive(t *testing.T) {
-	apiKey, endpointID := loadEnv(t)
-	client := runpod.NewClient(apiKey)
-	ctx := context.Background()
-
-	job, err := client.QuickRun(ctx, endpointID, map[string]interface{}{
-		"prompt": "Give a summary of machine learning.",
-	})
-	if err != nil {
-		t.Fatalf("QuickRun failed: %v", err)
-	}
-	t.Logf("🏃 Quick output: %v", job.Output)
-}
-
 func TestIsJobTerminalLive(t *testing.T) {
-	client := runpod.NewClient("dummy")
+	client := mustClient(t, "dummy")
 
 	tests := map[string]bool{
 		"COMPLETED":   true,

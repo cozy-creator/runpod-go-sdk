@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -31,32 +32,34 @@ const (
 	// DefaultUserAgent is the default user agent string
 	DefaultUserAgent = "runpod-go/1.0.0"
 
-	// MaxRetryAttempts is the maximum number of retry attempts for failed requests
-	MaxRetryAttempts = 3
+	// DefaultMaxRetryAttempts is the default number of retry attempts for
+	// failed requests.
+	DefaultMaxRetryAttempts = 3
 
-	// RetryDelay is the base delay between retry attempts
-	RetryDelay = 1 * time.Second
+	// DefaultRetryDelay is the base delay for exponential backoff between
+	// retry attempts.
+	DefaultRetryDelay = 1 * time.Second
+
+	// maxRetryDelay caps the exponential backoff.
+	maxRetryDelay = 30 * time.Second
 )
 
-// Client represents the RunPod API client
+// Client is the RunPod API client. Construct with NewClient; configure with
+// ClientOption functions. Safe for concurrent use.
 type Client struct {
-	// API configuration
-	APIKey            string
-	BaseURL           string
-	ServerlessBaseURL string
-	GraphQLBaseURL    string
+	apiKey            string
+	baseURL           string
+	serverlessBaseURL string
+	graphqlBaseURL    string
 
-	// HTTP client configuration
-	HTTPClient *http.Client
-	UserAgent  string
+	httpClient *http.Client
+	userAgent  string
 
-	// Client options
-	Debug            bool
-	MaxRetryAttempts int
-	RetryDelay       time.Duration
+	debug            bool
+	maxRetryAttempts int
+	retryDelay       time.Duration
 
-	// Logger for debug output
-	Logger Logger
+	logger Logger
 }
 
 // Logger interface for custom logging
@@ -74,141 +77,161 @@ func (l *defaultLogger) Printf(format string, v ...interface{}) {
 // ClientOption is a function type for configuring the client
 type ClientOption func(*Client)
 
-// WithBaseURL sets a custom base URL for the API
+// WithBaseURL sets a custom base URL for the REST API
 func WithBaseURL(baseURL string) ClientOption {
 	return func(c *Client) {
-		c.BaseURL = baseURL
+		c.baseURL = baseURL
 	}
 }
 
 // WithServerlessBaseURL sets a custom base URL for serverless operations
 func WithServerlessBaseURL(baseURL string) ClientOption {
 	return func(c *Client) {
-		c.ServerlessBaseURL = baseURL
+		c.serverlessBaseURL = baseURL
 	}
 }
 
 // WithGraphQLBaseURL sets a custom base URL for GraphQL operations.
 func WithGraphQLBaseURL(baseURL string) ClientOption {
 	return func(c *Client) {
-		c.GraphQLBaseURL = baseURL
+		c.graphqlBaseURL = baseURL
 	}
 }
 
 // WithTimeout sets a custom timeout for HTTP requests
 func WithTimeout(timeout time.Duration) ClientOption {
 	return func(c *Client) {
-		c.HTTPClient.Timeout = timeout
+		c.httpClient.Timeout = timeout
 	}
 }
 
 // WithHTTPClient sets a custom HTTP client
 func WithHTTPClient(httpClient *http.Client) ClientOption {
 	return func(c *Client) {
-		c.HTTPClient = httpClient
+		c.httpClient = httpClient
 	}
 }
 
 // WithDebug enables or disables debug logging
 func WithDebug(debug bool) ClientOption {
 	return func(c *Client) {
-		c.Debug = debug
+		c.debug = debug
 	}
 }
 
 // WithUserAgent sets a custom user agent string
 func WithUserAgent(userAgent string) ClientOption {
 	return func(c *Client) {
-		c.UserAgent = userAgent
+		c.userAgent = userAgent
 	}
 }
 
 // WithMaxRetryAttempts sets the maximum number of retry attempts
 func WithMaxRetryAttempts(maxAttempts int) ClientOption {
 	return func(c *Client) {
-		c.MaxRetryAttempts = maxAttempts
+		c.maxRetryAttempts = maxAttempts
 	}
 }
 
-// WithRetryDelay sets the base delay between retry attempts
+// WithRetryDelay sets the base delay for exponential backoff between retries
 func WithRetryDelay(delay time.Duration) ClientOption {
 	return func(c *Client) {
-		c.RetryDelay = delay
+		c.retryDelay = delay
 	}
 }
 
 // WithLogger sets a custom logger for debug output
 func WithLogger(logger Logger) ClientOption {
 	return func(c *Client) {
-		c.Logger = logger
+		c.logger = logger
 	}
 }
 
-// NewClient creates a new RunPod API client
-func NewClient(apiKey string, opts ...ClientOption) *Client {
-	if apiKey == "" {
-		panic("API key is required")
+// NewClient creates a new RunPod API client.
+func NewClient(apiKey string, opts ...ClientOption) (*Client, error) {
+	if strings.TrimSpace(apiKey) == "" {
+		return nil, NewValidationError("apiKey", "cannot be empty")
 	}
 
 	c := &Client{
-		APIKey:            apiKey,
-		BaseURL:           DefaultBaseURL,
-		ServerlessBaseURL: DefaultServerlessBaseURL,
-		GraphQLBaseURL:    DefaultGraphQLBaseURL,
-		HTTPClient: &http.Client{
+		apiKey:            apiKey,
+		baseURL:           DefaultBaseURL,
+		serverlessBaseURL: DefaultServerlessBaseURL,
+		graphqlBaseURL:    DefaultGraphQLBaseURL,
+		httpClient: &http.Client{
 			Timeout: DefaultTimeout,
 		},
-		UserAgent:        DefaultUserAgent,
-		Debug:            false,
-		MaxRetryAttempts: MaxRetryAttempts,
-		RetryDelay:       RetryDelay,
-		Logger:           &defaultLogger{},
+		userAgent:        DefaultUserAgent,
+		maxRetryAttempts: DefaultMaxRetryAttempts,
+		retryDelay:       DefaultRetryDelay,
+		logger:           &defaultLogger{},
 	}
 
-	// Apply all options
 	for _, opt := range opts {
 		opt(c)
 	}
+	if c.httpClient == nil {
+		c.httpClient = &http.Client{Timeout: DefaultTimeout}
+	}
+	if c.logger == nil {
+		c.logger = &defaultLogger{}
+	}
 
-	return c
+	return c, nil
 }
 
-// makeRequest performs an HTTP request with retry logic
+// makeRequest performs an HTTP request with retry logic.
+//
+// Retries use exponential backoff with jitter, honoring the Retry-After
+// header on 429 responses. 5xx responses are retried only for non-POST
+// requests: POSTs are not idempotent (retrying POST /pods or /v2/{id}/run
+// can create duplicate pods or jobs), and RunPod signals ordinary stock-outs
+// as 500 "no instances available". 429 is safe to retry for any method since
+// the request was rejected before processing.
 func (c *Client) makeRequest(ctx context.Context, method, endpoint string, body interface{}) (*http.Response, error) {
-	var lastErr error
+	var jsonBody []byte
+	if body != nil {
+		var err error
+		jsonBody, err = json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request body: %w", err)
+		}
+	}
 
-	for attempt := 0; attempt <= c.MaxRetryAttempts; attempt++ {
+	var lastErr error
+	var retryAfter time.Duration
+
+	for attempt := 0; attempt <= c.maxRetryAttempts; attempt++ {
 		if attempt > 0 {
-			// Wait before retrying
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(c.RetryDelay * time.Duration(attempt)):
+			case <-time.After(c.backoff(attempt, retryAfter)):
 			}
+			retryAfter = 0
 		}
 
-		resp, err := c.doRequest(ctx, method, endpoint, body)
+		resp, err := c.doRequest(ctx, method, endpoint, jsonBody, body)
 		if err != nil {
 			lastErr = err
 
-			// Check if this is a retryable error
 			if !c.isRetryableError(err) {
 				return nil, err
 			}
 
-			if c.Debug {
-				c.Logger.Printf("[DEBUG] Request attempt %d failed, retrying: %v", attempt+1, err)
+			if c.debug {
+				c.logger.Printf("[DEBUG] Request attempt %d failed, retrying: %v", attempt+1, err)
 			}
 			continue
 		}
 
-		// Check if response indicates a retryable error
-		if c.isRetryableHTTPStatus(method, resp.StatusCode) && attempt < c.MaxRetryAttempts {
+		if c.isRetryableHTTPStatus(method, resp.StatusCode) && attempt < c.maxRetryAttempts {
+			retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
 			resp.Body.Close()
 			lastErr = fmt.Errorf("HTTP %d: retryable server error", resp.StatusCode)
 
-			if c.Debug {
-				c.Logger.Printf("[DEBUG] HTTP %d received, retrying attempt %d", resp.StatusCode, attempt+1)
+			if c.debug {
+				c.logger.Printf("[DEBUG] HTTP %d received, retrying attempt %d", resp.StatusCode, attempt+1)
 			}
 			continue
 		}
@@ -216,22 +239,55 @@ func (c *Client) makeRequest(ctx context.Context, method, endpoint string, body 
 		return resp, nil
 	}
 
-	return nil, fmt.Errorf("request failed after %d attempts: %w", c.MaxRetryAttempts+1, lastErr)
+	return nil, fmt.Errorf("request failed after %d attempts: %w", c.maxRetryAttempts+1, lastErr)
 }
 
-// doRequest performs a single HTTP request
-func (c *Client) doRequest(ctx context.Context, method, endpoint string, body interface{}) (*http.Response, error) {
-	var buf io.Reader
+// backoff computes the wait before retry `attempt` (1-based). A
+// server-provided Retry-After wins; otherwise exponential backoff with
+// jitter on the upper half of the window.
+func (c *Client) backoff(attempt int, retryAfter time.Duration) time.Duration {
+	if retryAfter > 0 {
+		return retryAfter
+	}
+	d := c.retryDelay
+	if d <= 0 {
+		d = DefaultRetryDelay
+	}
+	for i := 1; i < attempt && d < maxRetryDelay; i++ {
+		d *= 2
+	}
+	if d > maxRetryDelay {
+		d = maxRetryDelay
+	}
+	half := d / 2
+	return half + time.Duration(rand.Int63n(int64(half)+1))
+}
 
-	if body != nil {
-		jsonBody, err := json.Marshal(body)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal request body: %w", err)
+// parseRetryAfter parses a Retry-After header value: either delay-seconds or
+// an HTTP date. Returns 0 when absent/unparseable.
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil && secs >= 0 {
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
 		}
-		buf = bytes.NewBuffer(jsonBody)
+	}
+	return 0
+}
+
+// doRequest performs a single HTTP request.
+func (c *Client) doRequest(ctx context.Context, method, endpoint string, jsonBody []byte, body interface{}) (*http.Response, error) {
+	var buf io.Reader
+	if jsonBody != nil {
+		buf = bytes.NewReader(jsonBody)
 	}
 
-	// Determine the full URL based on endpoint
 	fullURL := c.buildURL(endpoint)
 
 	req, err := http.NewRequestWithContext(ctx, method, fullURL, buf)
@@ -239,47 +295,43 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, body in
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Set headers
-	c.setRequestHeaders(req, body != nil)
+	c.setRequestHeaders(req, jsonBody != nil)
 
-	if c.Debug {
-		c.Logger.Printf("[DEBUG] %s %s", method, fullURL)
+	if c.debug {
+		c.logger.Printf("[DEBUG] %s %s", method, fullURL)
 		if body != nil {
 			bodyJSON, _ := json.MarshalIndent(body, "", "  ")
-			c.Logger.Printf("[DEBUG] Request Body: %s", string(bodyJSON))
+			c.logger.Printf("[DEBUG] Request Body: %s", string(bodyJSON))
 		}
 	}
 
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, NewNetworkError("HTTP request failed", err)
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
 
 	return resp, nil
 }
 
-// buildURL constructs the full URL for a given endpoint
+// buildURL constructs the full URL for a given endpoint. Absolute URLs pass
+// through unchanged (the GraphQL and serverless method groups build absolute
+// URLs against their own bases); anything else is a REST API path.
 func (c *Client) buildURL(endpoint string) string {
 	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
 		return endpoint
 	}
+	return c.baseURL + endpoint
+}
 
-	// If endpoint starts with /v2/ or contains api.runpod.ai, it's a serverless endpoint
-	if strings.HasPrefix(endpoint, "/v2/") || strings.Contains(endpoint, "api.runpod.ai") {
-		if strings.HasPrefix(endpoint, "/v2/") {
-			return c.ServerlessBaseURL + endpoint
-		}
-		return endpoint // Assume it's already a full URL
-	}
-
-	// Standard REST API endpoint
-	return c.BaseURL + endpoint
+// serverlessURL builds an absolute URL against the serverless base.
+func (c *Client) serverlessURL(path string) string {
+	return strings.TrimRight(c.serverlessBaseURL, "/") + path
 }
 
 // setRequestHeaders sets the required headers for the request
 func (c *Client) setRequestHeaders(req *http.Request, hasBody bool) {
-	req.Header.Set("Authorization", "Bearer "+c.APIKey)
-	req.Header.Set("User-Agent", c.UserAgent)
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("User-Agent", c.userAgent)
 
 	if hasBody {
 		req.Header.Set("Content-Type", "application/json")
@@ -292,20 +344,18 @@ func (c *Client) handleResponse(resp *http.Response, v interface{}) error {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return NewNetworkError("failed to read response body", err)
+		return fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	if c.Debug {
-		c.Logger.Printf("[DEBUG] Response Status: %d", resp.StatusCode)
-		c.Logger.Printf("[DEBUG] Response Body: %s", string(body))
+	if c.debug {
+		c.logger.Printf("[DEBUG] Response Status: %d", resp.StatusCode)
+		c.logger.Printf("[DEBUG] Response Body: %s", string(body))
 	}
 
-	// Handle error responses
 	if resp.StatusCode >= 400 {
 		return c.parseErrorResponse(resp.StatusCode, resp.Header, body)
 	}
 
-	// Parse successful response
 	if v != nil && len(body) > 0 {
 		if err := json.Unmarshal(body, v); err != nil {
 			return fmt.Errorf("failed to unmarshal response: %w", err)
@@ -315,83 +365,71 @@ func (c *Client) handleResponse(resp *http.Response, v interface{}) error {
 	return nil
 }
 
-// parseErrorResponse parses error responses from the API
+// parseErrorResponse parses error responses from the API into *APIError.
 func (c *Client) parseErrorResponse(statusCode int, header http.Header, body []byte) error {
-	// Try to parse as structured API error
-	var apiErr APIError
-	if err := json.Unmarshal(body, &apiErr); err == nil && apiErr.Message != "" {
-		apiErr.StatusCode = statusCode
-		return &apiErr
+	var retryAfter time.Duration
+	if statusCode == 429 {
+		retryAfter = parseRetryAfter(header.Get("Retry-After"))
 	}
 
-	// Try to parse as simple error message
+	// Try to parse as structured API error.
+	var structured APIError
+	if err := json.Unmarshal(body, &structured); err == nil && structured.Message != "" {
+		structured.StatusCode = statusCode
+		structured.RetryAfter = retryAfter
+		return &structured
+	}
+
+	apiErr := &APIError{StatusCode: statusCode, RetryAfter: retryAfter}
+
+	// Try to parse as simple error message.
 	var simpleErr struct {
 		Error   string `json:"error"`
 		Message string `json:"message"`
 	}
 	if err := json.Unmarshal(body, &simpleErr); err == nil {
-		message := simpleErr.Error
-		if message == "" {
-			message = simpleErr.Message
-		}
-		if message != "" {
-			return &APIError{
-				StatusCode: statusCode,
-				Message:    message,
-			}
+		if simpleErr.Error != "" {
+			apiErr.Message = simpleErr.Error
+		} else if simpleErr.Message != "" {
+			apiErr.Message = simpleErr.Message
 		}
 	}
-
-	// Handle specific status codes
-	switch statusCode {
-	case 401:
-		return NewAuthError("invalid or expired API key")
-	case 403:
-		return NewAuthError("insufficient permissions")
-	case 404:
-		return NewAPIError(404, "resource not found")
-	case 429:
-		retryAfter := "unknown"
-		if v := header.Get("Retry-After"); v != "" {
-			retryAfter = v + " seconds"
+	if apiErr.Message == "" {
+		switch statusCode {
+		case 401:
+			apiErr.Message = "invalid or expired API key"
+		case 403:
+			apiErr.Message = "insufficient permissions"
+		case 404:
+			apiErr.Message = "resource not found"
+		case 429:
+			apiErr.Message = "rate limit exceeded"
+		case 500, 502, 503, 504:
+			apiErr.Message = "server error"
+		default:
+			apiErr.Message = strings.TrimSpace(string(body))
 		}
-		return NewRateLimitError("rate limit exceeded", retryAfter)
-	case 500, 502, 503, 504:
-		return NewAPIError(statusCode, "server error")
-	default:
-		// Fallback to raw response body
-		return NewAPIError(statusCode, string(body))
 	}
+	return apiErr
 }
 
-// isRetryableError determines if an error should trigger a retry
+// isRetryableError determines if an error should trigger a retry. API errors
+// retry only on 5xx; validation errors never retry; transport-level failures
+// (no HTTP response) are considered transient.
 func (c *Client) isRetryableError(err error) bool {
-	// Network errors are generally retryable
-	if IsNetworkError(err) {
-		return true
-	}
-
-	// Timeout errors are retryable
-	if IsTimeoutError(err) {
-		return true
-	}
-
-	// API errors with 5xx status codes are retryable
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
 		return apiErr.IsServerError()
 	}
-
-	return false
+	var valErr *ValidationError
+	if errors.As(err, &valErr) {
+		return false
+	}
+	return true
 }
 
 // isRetryableHTTPStatus determines if an HTTP status code should trigger a
-// retry. 5xx responses are retried only for non-POST requests: POSTs are not
-// idempotent (retrying POST /pods or /v2/{id}/run can create duplicate pods
-// or jobs), and RunPod signals ordinary stock-outs as 500 "no instances
-// available" — retrying those only multiplies latency for the caller's own
-// fallback chain. 429 is safe to retry for any method since the request was
-// rejected before processing.
+// retry for the given method. See makeRequest for the POST rationale.
 func (c *Client) isRetryableHTTPStatus(method string, statusCode int) bool {
 	switch statusCode {
 	case 429:
@@ -525,32 +563,4 @@ func (c *Client) Patch(ctx context.Context, endpoint string, body interface{}, r
 		return err
 	}
 	return c.handleResponse(resp, result)
-}
-
-// GetAPIKey returns the configured API key (masked for security)
-func (c *Client) GetAPIKey() string {
-	if len(c.APIKey) <= 8 {
-		return "***"
-	}
-	return c.APIKey[:4] + "***" + c.APIKey[len(c.APIKey)-4:]
-}
-
-// GetBaseURL returns the configured base URL
-func (c *Client) GetBaseURL() string {
-	return c.BaseURL
-}
-
-// GetServerlessBaseURL returns the configured serverless base URL
-func (c *Client) GetServerlessBaseURL() string {
-	return c.ServerlessBaseURL
-}
-
-// GetGraphQLBaseURL returns the configured GraphQL base URL.
-func (c *Client) GetGraphQLBaseURL() string {
-	return c.GraphQLBaseURL
-}
-
-// IsDebugEnabled returns whether debug mode is enabled
-func (c *Client) IsDebugEnabled() bool {
-	return c.Debug
 }

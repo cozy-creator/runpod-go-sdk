@@ -3,6 +3,7 @@ package runpod_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -85,7 +86,7 @@ func TestListGPUTypes_Filtering(t *testing.T) {
 	})
 	defer server.Close()
 
-	client := runpod.NewClient("test_key", runpod.WithGraphQLBaseURL(server.URL))
+	client := mustClient(t, "test_key", runpod.WithGraphQLBaseURL(server.URL))
 	got, err := client.ListGPUTypes(context.Background(), &runpod.GPUTypeFilter{
 		IDs:            []string{"NVIDIA GeForce RTX 4090", "NVIDIA A100 SXM"},
 		MinCudaVersion: "12.8",
@@ -147,7 +148,7 @@ func TestListAvailableGPUs_OnlyAvailable(t *testing.T) {
 	})
 	defer server.Close()
 
-	client := runpod.NewClient("test_key", runpod.WithGraphQLBaseURL(server.URL))
+	client := mustClient(t, "test_key", runpod.WithGraphQLBaseURL(server.URL))
 	got, err := client.ListAvailableGPUs(context.Background(), "12.8", 1)
 	if err != nil {
 		t.Fatalf("ListAvailableGPUs error: %v", err)
@@ -184,7 +185,7 @@ func TestGetGPUType(t *testing.T) {
 	})
 	defer server.Close()
 
-	client := runpod.NewClient("test_key", runpod.WithGraphQLBaseURL(server.URL))
+	client := mustClient(t, "test_key", runpod.WithGraphQLBaseURL(server.URL))
 
 	found, err := client.GetGPUType(context.Background(), "gpu-1")
 	if err != nil {
@@ -198,8 +199,8 @@ func TestGetGPUType(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected not found error")
 	}
-	if !runpod.IsAPIError(err) {
-		t.Fatalf("expected APIError, got %T", err)
+	if !errors.Is(err, runpod.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
 

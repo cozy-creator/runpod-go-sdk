@@ -80,9 +80,8 @@ func (c *Client) ListAvailableGPUs(ctx context.Context, minCudaVersion string, g
 			continue
 		}
 		out = append(out, GPUTypeWithAvailability{
-			GPUType:        gpu,
-			StockStatus:    status,
-			AvailableCount: deriveAvailableCount(status),
+			GPUType:     gpu,
+			StockStatus: status,
 		})
 	}
 
@@ -165,17 +164,6 @@ func isAvailableStockStatus(status string) bool {
 		return true
 	default:
 		return false
-	}
-}
-
-func deriveAvailableCount(status string) int {
-	switch strings.ToUpper(strings.TrimSpace(status)) {
-	case "AVAILABLE", "IN_STOCK", "HIGH":
-		return 2
-	case "LOW", "LOW_STOCK":
-		return 1
-	default:
-		return 0
 	}
 }
 

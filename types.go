@@ -233,64 +233,21 @@ func AllCudaVersions() []string {
 	}
 }
 
-type UpdatePodRequest struct {
-	Name string            `json:"name,omitempty"`
-	Env  map[string]string `json:"env,omitempty"`
-}
-
-type Endpoint struct {
-	ID               string    `json:"id"`
-	Name             string    `json:"name"`
-	TemplateID       string    `json:"templateId"`
-	GPUTypeIDs       []string  `json:"gpuTypeIds"`
-	ScalerType       string    `json:"scalerType"`
-	ScalerValue      int       `json:"scalerValue"`
-	WorkersMin       int       `json:"workersMin"`
-	WorkersMax       int       `json:"workersMax"`
-	IdleTimeout      int       `json:"idleTimeout"`
-	ExecutionTimeout int       `json:"executionTimeoutMs"`
-	CreatedAt        *JSONTime `json:"createdAt"`
-	Status           string    `json:"status"`
-	URL              string    `json:"url,omitempty"`
-}
-
-type CreateEndpointRequest struct {
-	Name                string   `json:"name"`
-	TemplateID          string   `json:"templateId"`
-	GPUTypeIDs          []string `json:"gpuTypeIds"`
-	ScalerType          string   `json:"scalerType"`
-	ScalerValue         int      `json:"scalerValue"`
-	WorkersMin          int      `json:"workersMin"`
-	WorkersMax          int      `json:"workersMax"`
-	IdleTimeout         int      `json:"idleTimeout"`
-	ExecutionTimeout    int      `json:"executionTimeoutMs"`
-	AllowedCudaVersions []string `json:"allowedCudaVersions,omitempty"`
-}
-
-type UpdateEndpointRequest struct {
-	Name             string   `json:"name,omitempty"`
-	GPUTypeIDs       []string `json:"gpuTypeIds,omitempty"`
-	ScalerType       string   `json:"scalerType,omitempty"`
-	ScalerValue      int      `json:"scalerValue,omitempty"`
-	WorkersMin       int      `json:"workersMin,omitempty"`
-	WorkersMax       int      `json:"workersMax,omitempty"`
-	IdleTimeout      int      `json:"idleTimeout,omitempty"`
-	ExecutionTimeout int      `json:"executionTimeoutMs,omitempty"`
-}
-
+// Job is a serverless job. Input/Output/Stream are raw JSON — unmarshal
+// them into your own types.
 type Job struct {
-	ID            string      `json:"id"`
-	Status        string      `json:"status"`
-	Input         interface{} `json:"input"`
-	Output        interface{} `json:"output,omitempty"`
-	Stream        interface{} `json:"stream,omitempty"`
-	Error         string      `json:"error,omitempty"`
-	CreatedAt     *JSONTime   `json:"createdAt"`
-	StartedAt     *JSONTime   `json:"startedAt,omitempty"`
-	CompletedAt   *JSONTime   `json:"completedAt,omitempty"`
-	ExecutionTime int         `json:"executionTimeMs,omitempty"`
-	RetryCount    int         `json:"retryCount,omitempty"`
-	EndpointID    string      `json:"endpointId,omitempty"`
+	ID            string          `json:"id"`
+	Status        string          `json:"status"`
+	Input         json.RawMessage `json:"input,omitempty"`
+	Output        json.RawMessage `json:"output,omitempty"`
+	Stream        json.RawMessage `json:"stream,omitempty"`
+	Error         string          `json:"error,omitempty"`
+	CreatedAt     *JSONTime       `json:"createdAt"`
+	StartedAt     *JSONTime       `json:"startedAt,omitempty"`
+	CompletedAt   *JSONTime       `json:"completedAt,omitempty"`
+	ExecutionTime int             `json:"executionTimeMs,omitempty"`
+	RetryCount    int             `json:"retryCount,omitempty"`
+	EndpointID    string          `json:"endpointId,omitempty"`
 }
 
 type RunJobRequest struct {
@@ -308,60 +265,13 @@ const (
 	JobStatusTimedOut   JobStatus = "TIMED_OUT"
 )
 
-type Template struct {
-	ID                string            `json:"id"`
-	Name              string            `json:"name"`
-	ImageName         string            `json:"imageName"`
-	IsServerless      bool              `json:"isServerless"`
-	ContainerDiskInGB int               `json:"containerDiskInGb"`
-	VolumeInGB        int               `json:"volumeInGb"`
-	VolumeMountPath   string            `json:"volumeMountPath"`
-	Env               map[string]string `json:"env"`
-	Ports             string            `json:"ports"`
-	DockerArgs        string            `json:"dockerArgs"`
-	CreatedAt         *JSONTime         `json:"createdAt"`
-	Runtime           *TemplateRuntime  `json:"runtime,omitempty"`
-}
-
-type TemplateRuntime struct {
-	ContainerRegistryAuthID string `json:"containerRegistryAuthId,omitempty"`
-	StartSSH                bool   `json:"startSsh,omitempty"`
-}
-
-type CreateTemplateRequest struct {
-	Name              string            `json:"name"`
-	ImageName         string            `json:"imageName"`
-	IsServerless      bool              `json:"isServerless"`
-	ContainerDiskInGB int               `json:"containerDiskInGb"`
-	VolumeInGB        int               `json:"volumeInGb,omitempty"`
-	VolumeMountPath   string            `json:"volumeMountPath,omitempty"`
-	Env               map[string]string `json:"env,omitempty"`
-	Ports             string            `json:"ports,omitempty"`
-	DockerArgs        string            `json:"dockerArgs,omitempty"`
-	Runtime           *TemplateRuntime  `json:"runtime,omitempty"`
-}
-
-type UpdateTemplateRequest struct {
-	Name              string            `json:"name,omitempty"`
-	ImageName         string            `json:"imageName,omitempty"`
-	ContainerDiskInGB int               `json:"containerDiskInGb,omitempty"`
-	VolumeInGB        int               `json:"volumeInGb,omitempty"`
-	VolumeMountPath   string            `json:"volumeMountPath,omitempty"`
-	Env               map[string]string `json:"env,omitempty"`
-	Ports             string            `json:"ports,omitempty"`
-	DockerArgs        string            `json:"dockerArgs,omitempty"`
-	Runtime           *TemplateRuntime  `json:"runtime,omitempty"`
-}
-
 type GPUType struct {
-	ID             string  `json:"id"`
-	DisplayName    string  `json:"displayName"`
-	MemoryInGB     int     `json:"memoryInGb"`
-	CostPerHour    float64 `json:"costPerHr"`
-	Available      bool    `json:"available"`
-	CommunityCloud bool    `json:"communityCloud"`
-	SecureCloud    bool    `json:"secureCloud"`
-	LowestPrice    *Price  `json:"lowestPrice,omitempty"`
+	ID             string `json:"id"`
+	DisplayName    string `json:"displayName"`
+	MemoryInGB     int    `json:"memoryInGb"`
+	CommunityCloud bool   `json:"communityCloud"`
+	SecureCloud    bool   `json:"secureCloud"`
+	LowestPrice    *Price `json:"lowestPrice,omitempty"`
 }
 
 type Price struct {
@@ -383,8 +293,7 @@ type GPUTypeFilter struct {
 
 type GPUTypeWithAvailability struct {
 	GPUType
-	StockStatus    string
-	AvailableCount int
+	StockStatus string
 }
 
 type GetPodOptions struct {
@@ -412,22 +321,6 @@ type PodDiagnostics struct {
 type ProviderFeatureSupport struct {
 	PodLogsAPI bool
 	Reason     string
-}
-
-type Datacenter struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Country string `json:"country"`
-	Region  string `json:"region,omitempty"`
-}
-
-type AccountInfo struct {
-	ID                string  `json:"id"`
-	Email             string  `json:"email"`
-	Balance           float64 `json:"balance"`
-	SpendLimit        float64 `json:"spendLimit,omitempty"`
-	CurrentSpendPerHr float64 `json:"currentSpendPerHr"`
-	MachineQuota      int     `json:"machineQuota,omitempty"`
 }
 
 // NetworkVolume represents a network volume.
@@ -463,12 +356,6 @@ type CreateContainerRegistryAuthRequest struct {
 	Name     string `json:"name"`
 	Username string `json:"username"`
 	Password string `json:"password"`
-}
-
-type WebhookConfig struct {
-	URL     string            `json:"url"`
-	Headers map[string]string `json:"headers,omitempty"`
-	Secret  string            `json:"secret,omitempty"`
 }
 
 type EndpointHealth struct {

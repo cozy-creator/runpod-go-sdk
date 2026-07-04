@@ -13,45 +13,42 @@ import (
 
 func main() {
 	if err := godotenv.Load(); err != nil {
-		log.Fatal("❌ Failed to load .env")
+		log.Fatal("failed to load .env")
 	}
 
 	apiKey := os.Getenv("RUNPOD_API_KEY")
 	endpointID := os.Getenv("RUNPOD_ENDPOINT_ID")
 
-	client := runpod.NewClient(apiKey,
+	client, err := runpod.NewClient(apiKey,
 		runpod.WithDebug(true),
 		runpod.WithTimeout(60*time.Second),
 	)
+	if err != nil {
+		log.Fatalf("failed to create client: %v", err)
+	}
 
 	ctx := context.Background()
 
-	// Step 1: Prepare multiple prompts
+	// Step 1: Submit a few jobs
 	inputs := []interface{}{
 		map[string]interface{}{"prompt": "Job 1 - Just wait"},
 		map[string]interface{}{"prompt": "Job 2 - Please wait"},
 		map[string]interface{}{"prompt": "Job 3 - This should be purged"},
 	}
 
-	fmt.Println("🚀 Submitting multiple jobs...")
-	jobs, err := client.SubmitMultipleJobs(ctx, endpointID, inputs)
-	if err != nil {
-		log.Fatalf("❌ Failed to submit jobs: %v", err)
-	}
-
-	for i, job := range jobs {
-		if job != nil {
-			fmt.Printf("📦 Job %d submitted: %s\n", i+1, job.ID)
-		} else {
-			fmt.Printf("❌ Job %d submission failed or nil\n", i+1)
+	fmt.Println("submitting jobs...")
+	for i, input := range inputs {
+		job, err := client.RunAsync(ctx, endpointID, input)
+		if err != nil {
+			log.Fatalf("failed to submit job %d: %v", i+1, err)
 		}
+		fmt.Printf("job %d submitted: %s\n", i+1, job.ID)
 	}
 
 	// Step 2: Immediately purge the queue
-	fmt.Println("🧹 Purging queued jobs immediately...")
-	err = client.PurgeQueue(ctx, endpointID)
-	if err != nil {
-		log.Fatalf("❌ Failed to purge queue: %v", err)
+	fmt.Println("purging queued jobs...")
+	if err := client.PurgeQueue(ctx, endpointID); err != nil {
+		log.Fatalf("failed to purge queue: %v", err)
 	}
-	fmt.Println("✅ Purge request sent.")
+	fmt.Println("purge request sent")
 }
