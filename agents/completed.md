@@ -9,7 +9,7 @@
 
 **Status:** DONE (2026-07-04)
 
-Shipped: `CreatePodWithFallback` + `NoCapacityError`/`ErrNoCapacity` sentinel + `FallbackExhaustedError` aggregate; plain `CreatePod` fans out automatically when `len(GPUTypeIDs) > 1`. 4xx/transport errors abort the fan-out; 5xx continues. Tensorhub migration deferred to the tensorhub-tracker adoption issue.
+Shipped: `CreatePodWithFallback` + `NoCapacityError`/`ErrNoCapacity` sentinel + `FallbackExhaustedError` aggregate; plain `CreatePod` fans out automatically when `len(GPUTypeIDs) > 1`. 4xx/transport errors abort the fan-out; 5xx continues. Tensorhub migration deferred to the tensorhub-tracker adoption issue (tensorhub #549).
 
 Audit 2026-07 (greenfield verdict). tensorhub discovered (its issue #350) that RunPod's REST `POST /pods` does NOT walk `gpuTypeIds` when the first type has no stock — it returns 500 "no instances available". The consumer had to reimplement a per-type fan-out loop plus a per-release failure tracker (~100 lines in tensorhub `pod.go` + `pod_failure_tracker.go`). That is provider-protocol knowledge and belongs in the SDK, not in every consumer.
 
@@ -28,7 +28,7 @@ Design: `CreatePodWithFallback(ctx, req, candidates []string) (*Pod, error)` (or
 
 **Status:** DONE (2026-07-04)
 
-Shipped: REST `ListNetworkVolumes`/`GetNetworkVolume`/`CreateNetworkVolume`/`UpdateNetworkVolume`/`DeleteNetworkVolume` and `ListContainerRegistryAuths`/`CreateContainerRegistryAuth`/`DeleteContainerRegistryAuth`, plus `IsRegistryAuthError` typed detection (capacity errors and SDK API-key errors excluded). `NetworkVolume.DataCenterID` json tag fixed to `dataCenterId` (REST parity). Mock CRUD tests + RUNPOD_API_KEY-gated live list tests. Tensorhub migration deferred to the tensorhub-tracker adoption issue.
+Shipped: REST `ListNetworkVolumes`/`GetNetworkVolume`/`CreateNetworkVolume`/`UpdateNetworkVolume`/`DeleteNetworkVolume` and `ListContainerRegistryAuths`/`CreateContainerRegistryAuth`/`DeleteContainerRegistryAuth`, plus `IsRegistryAuthError` typed detection (capacity errors and SDK API-key errors excluded). `NetworkVolume.DataCenterID` json tag fixed to `dataCenterId` (REST parity). Mock CRUD tests + RUNPOD_API_KEY-gated live list tests. Tensorhub migration deferred to the tensorhub-tracker adoption issue (tensorhub #549).
 
 Audit 2026-07. tensorhub hand-rolls, next to the SDK, its own HTTP plumbing for exactly the two resources the SDK lacks:
 
@@ -102,7 +102,7 @@ Audit 2026-07. The client core mostly works but has fossil edges:
 
 **Status:** DONE (2026-07-04)
 
-Shipped: `GPUSpec` catalog (23 SKUs, Ampere→Blackwell incl. RTX 5090 SM120, B200 SM100, RTX PRO 6000 Blackwell, H200) + `GPUCatalog()`/`GPUSpecByID()`/`GPUsWithAtLeast(vram, smMin)`/`GPUTypeIDs()` helpers, fallback-preference ordered. `defaultGPUTypeIDLadder`/`DefaultGPUTypeID` deleted. Live-gated `TestGPUCatalogIDsLive` verifies every ID against the real gpuTypes query. Tensorhub `gpu_selection.go` migration deferred to the tensorhub-tracker adoption issue.
+Shipped: `GPUSpec` catalog (23 SKUs, Ampere→Blackwell incl. RTX 5090 SM120, B200 SM100, RTX PRO 6000 Blackwell, H200) + `GPUCatalog()`/`GPUSpecByID()`/`GPUsWithAtLeast(vram, smMin)`/`GPUTypeIDs()` helpers, fallback-preference ordered. `defaultGPUTypeIDLadder`/`DefaultGPUTypeID` deleted. Live-gated `TestGPUCatalogIDsLive` verifies every ID against the real gpuTypes query. Tensorhub `gpu_selection.go` migration deferred to the tensorhub-tracker adoption issue (tensorhub #549).
 
 Audit 2026-07. GPU knowledge is split and diverging: the SDK has `defaultGPUTypeIDLadder` (id + VRAM only, no A40/A100-SXM4/H100-PCIe), tensorhub has `KnownGPUs` (id + VRAM + SM capability, no 3070/3080/4080). Both are static; neither knows B200/Blackwell datacenter SKUs. A Vast.ai-style sibling provider would need the same table again.
 
