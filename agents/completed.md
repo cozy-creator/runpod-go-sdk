@@ -144,3 +144,22 @@ Audit 2026-07. Tests exist and are decent (mock httptest servers for jobs/gpu-ty
 - [x] Fold root-level `cpu_pods_test.go`/`pods_timing_test.go` and `tests/` into one layout; document `go test ./...` (unit) vs `RUNPOD_API_KEY=... go test -tags live` (integration)
 - [x] README audit: remove/rewrite sections describing deleted or never-implemented surface (endpoints/templates CRUD, pod logs); add a truthful capability matrix (REST vs GraphQL per resource)
 - [x] Godoc pass on exported symbols after #4/#6 deletions
+
+---
+
+# #10: live GraphQL gpuTypes query 400s — LowestPrice schema drift (interruptablePrice, cudaVersion)
+
+**Status:** DONE (2026-07-04, PR #5, commit 5eeb8dd)
+
+RunPod's live GraphQL schema no longer has `interruptablePrice` or `cudaVersion` on `LowestPrice`
+(400 GRAPHQL_VALIDATION_FAILED: "Did you mean uninterruptablePrice?"). `ListGPUTypes`, `ListAvailableGPUs`
+and `ListGPUOffers` fail against the real API; `TestGPUCatalogIDsLive` and `TestGPUOffersLive` are red.
+runpodtest still serves the old shape, so unit tests stay green — fix both together.
+
+Tasks:
+- [x] Drop/replace the removed `LowestPrice` fields in the gpuTypes query (spot price now via `minimumBidPrice`?)
+- [x] Re-verify `-tags live`: TestGPUCatalogIDsLive + TestGPUOffersLive green
+- [x] Mirror the corrected shape in runpodtest's gpuTypes handler
+- [x] Unblocks tensorhub's optional `ListGPUOffers`+`BidPerGPU` spot placement follow-up (#549)
+
+Shipped: dropped `interruptablePrice`/`cudaVersion` from the `gpuTypes` queries, `Price`, and `GPUOffer` — verified against the live API (introspection disabled; probed per field) that `minimumBidPrice` (spot bid floor) is the only spot pricing signal RunPod still exposes; `lowestPrice(input:{...})` args all still work. runpodtest now rejects the removed fields like the live API (word-bounded regex) + regression test. Live: TestGPUCatalogIDsLive + TestGPUOffersLive PASS. Godoc + README note the upstream removal.

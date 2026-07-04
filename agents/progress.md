@@ -189,21 +189,3 @@ Goal:
 ## Priority
 
 high
-
----
-
-# #10: live GraphQL gpuTypes query 400s — LowestPrice schema drift (interruptablePrice, cudaVersion)
-
-**Completed:** no
-**Status:** OPEN — filed 2026-07-04 during tensorhub #549 adoption.
-
-RunPod's live GraphQL schema no longer has `interruptablePrice` or `cudaVersion` on `LowestPrice`
-(400 GRAPHQL_VALIDATION_FAILED: "Did you mean uninterruptablePrice?"). `ListGPUTypes`, `ListAvailableGPUs`
-and `ListGPUOffers` fail against the real API; `TestGPUCatalogIDsLive` and `TestGPUOffersLive` are red.
-runpodtest still serves the old shape, so unit tests stay green — fix both together.
-
-Tasks:
-- [ ] Drop/replace the removed `LowestPrice` fields in the gpuTypes query (spot price now via `minimumBidPrice`?)
-- [ ] Re-verify `-tags live`: TestGPUCatalogIDsLive + TestGPUOffersLive green
-- [ ] Mirror the corrected shape in runpodtest's gpuTypes handler
-- [ ] Unblocks tensorhub's optional `ListGPUOffers`+`BidPerGPU` spot placement follow-up (#549)
