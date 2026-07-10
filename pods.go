@@ -33,6 +33,7 @@ func (c *Client) createPod(ctx context.Context, req *CreatePodRequest) (*Pod, er
 		return nil, fmt.Errorf("failed to create pod: %w", classifyCreatePodError(err, req))
 	}
 
+	pod.normalize()
 	return &pod, nil
 }
 
@@ -96,6 +97,7 @@ func (c *Client) GetPodWithOptions(ctx context.Context, podID string, opts *GetP
 		return nil, fmt.Errorf("failed to get pod %s: %w", podID, err)
 	}
 
+	pod.normalize()
 	return &pod, nil
 }
 
@@ -121,12 +123,14 @@ func (c *Client) ListPods(ctx context.Context, opts *ListOptions) ([]*Pod, error
 		Pods []*Pod `json:"pods"`
 	}
 	if err := json.Unmarshal(raw, &wrapped); err == nil && wrapped.Pods != nil {
+		normalizePods(wrapped.Pods)
 		return wrapped.Pods, nil
 	}
 
 	// Fallback: bare array.
 	var pods []*Pod
 	if err := json.Unmarshal(raw, &pods); err == nil {
+		normalizePods(pods)
 		return pods, nil
 	}
 
@@ -161,6 +165,7 @@ func (c *Client) ResumePod(ctx context.Context, podID string) (*Pod, error) {
 		return nil, fmt.Errorf("failed to resume pod %s: %w", podID, err)
 	}
 
+	pod.normalize()
 	return &pod, nil
 }
 
