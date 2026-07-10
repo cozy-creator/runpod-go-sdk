@@ -97,7 +97,12 @@ type Pod struct {
 	Name              string            `json:"name"`
 	DesiredStatus     string            `json:"desiredStatus"`
 	LastStatusChange  string            `json:"lastStatusChange,omitempty"`
-	ImageName         string            `json:"image"`
+	// ImageName is the pod's container image ref. The live REST API sends
+	// `imageName` on POST/GET/LIST responses (verified th#648) even though
+	// the published OpenAPI schema names it `image` — accept both via
+	// ImageAlt + normalizePod.
+	ImageName         string            `json:"imageName"`
+	ImageAlt          string            `json:"image,omitempty"`
 	GPUCount          int               `json:"gpuCount"`
 	VCPUCount         int               `json:"vcpuCount"`
 	MemoryInGB        int               `json:"memoryInGb"`
@@ -410,4 +415,23 @@ type CreateSecretRequest struct {
 // UpdateSecretRequest replaces a secret value.
 type UpdateSecretRequest struct {
 	Value string `json:"value"`
+}
+
+// normalize reconciles wire-format drift on a decoded Pod: the live REST API
+// sends `imageName` while the published schema says `image` — keep whichever
+// arrived (th#648).
+func (p *Pod) normalize() {
+	if p == nil {
+		return
+	}
+	if strings.TrimSpace(p.ImageName) == "" {
+		p.ImageName = strings.TrimSpace(p.ImageAlt)
+	}
+}
+
+// normalizePods normalizes every pod in a decoded list.
+func normalizePods(pods []*Pod) {
+	for _, p := range pods {
+		p.normalize()
+	}
 }
