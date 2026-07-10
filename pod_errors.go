@@ -102,7 +102,7 @@ func ClassifyPodErrorMessage(msg string) PodErrorClass {
 		return PodErrorImageAuth
 	case strings.Contains(m, "image_not_found") || strings.Contains(m, "manifest unknown") || strings.Contains(m, "not found: manifest"):
 		return PodErrorImageMissing
-	case strings.Contains(m, "out of memory") || strings.Contains(m, "oom"):
+	case strings.Contains(m, "out of memory") || strings.Contains(m, "oom kill") || strings.Contains(m, "oom_kill") || strings.Contains(m, "oomkilled"):
 		return PodErrorOOM
 	default:
 		return PodErrorUnknown
