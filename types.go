@@ -93,10 +93,10 @@ func (jt JSONTime) MarshalJSON() ([]byte, error) {
 
 // Pod is a RunPod GPU or CPU pod.
 type Pod struct {
-	ID                string            `json:"id"`
-	Name              string            `json:"name"`
-	DesiredStatus     string            `json:"desiredStatus"`
-	LastStatusChange  string            `json:"lastStatusChange,omitempty"`
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	DesiredStatus    string `json:"desiredStatus"`
+	LastStatusChange string `json:"lastStatusChange,omitempty"`
 	// ImageName is the pod's container image ref. The live REST API sends
 	// `imageName` on POST/GET/LIST responses (verified th#648) even though
 	// the published OpenAPI schema names it `image` — accept both via

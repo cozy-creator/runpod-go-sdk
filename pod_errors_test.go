@@ -75,7 +75,7 @@ func TestClassifyPodErrorMessage(t *testing.T) {
 		"manifest unknown":                                       runpod.PodErrorImageMissing,
 		"container killed: out of memory":                        runpod.PodErrorOOM,
 		"Exited by Runpod: Fri Jul 10 2026":                      runpod.PodErrorUnknown,
-		"": runpod.PodErrorUnknown,
+		"":                                                       runpod.PodErrorUnknown,
 	}
 	for msg, want := range cases {
 		if got := runpod.ClassifyPodErrorMessage(msg); got != want {
