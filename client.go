@@ -183,11 +183,11 @@ func NewClient(apiKey string, opts ...ClientOption) (*Client, error) {
 // makeRequest performs an HTTP request with retry logic.
 //
 // Retries use exponential backoff with jitter, honoring the Retry-After
-// header on 429 responses. 5xx responses are retried only for non-POST
-// requests: POSTs are not idempotent (retrying POST /pods or /v2/{id}/run
-// can create duplicate pods or jobs), and RunPod signals ordinary stock-outs
-// as 500 "no instances available". 429 is safe to retry for any method since
-// the request was rejected before processing.
+// header on 429 responses. Transport failures and 5xx responses are retried
+// only for non-POST requests: POSTs are not idempotent (retrying POST /pods or
+// /v2/{id}/run can create duplicate pods or jobs), and RunPod signals ordinary
+// stock-outs as 500 "no instances available". 429 is safe to retry for any
+// method since the request was rejected before processing.
 func (c *Client) makeRequest(ctx context.Context, method, endpoint string, body interface{}) (*http.Response, error) {
 	var jsonBody []byte
 	if body != nil {
@@ -215,7 +215,7 @@ func (c *Client) makeRequest(ctx context.Context, method, endpoint string, body 
 		if err != nil {
 			lastErr = err
 
-			if !c.isRetryableError(err) {
+			if method == http.MethodPost || !c.isRetryableError(err) {
 				return nil, err
 			}
 

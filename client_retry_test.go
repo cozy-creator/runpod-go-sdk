@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -72,6 +73,54 @@ func TestGet500Retried(t *testing.T) {
 	}
 }
 
+func TestTransportRetryRespectsMethodIdempotency(t *testing.T) {
+	t.Run("POST side effect is not replayed after EOF", func(t *testing.T) {
+		var attempts, sideEffects int32
+		client := mustClient(t, "test_key",
+			runpod.WithBaseURL("http://runpod.test"),
+			runpod.WithMaxRetryAttempts(3),
+			runpod.WithRetryDelay(time.Millisecond),
+			runpod.WithHTTPClient(&http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+				atomic.AddInt32(&attempts, 1)
+				atomic.AddInt32(&sideEffects, 1)
+				return nil, io.EOF
+			})}),
+		)
+
+		if err := client.Post(context.Background(), "/pods", map[string]string{"name": "pod"}, nil); err == nil {
+			t.Fatal("expected ambiguous transport error")
+		}
+		if got := atomic.LoadInt32(&attempts); got != 1 {
+			t.Fatalf("POST must be attempted once, got %d attempts", got)
+		}
+		if got := atomic.LoadInt32(&sideEffects); got != 1 {
+			t.Fatalf("POST side effect must occur once, got %d", got)
+		}
+	})
+
+	t.Run("GET retries after EOF", func(t *testing.T) {
+		var attempts int32
+		client := mustClient(t, "test_key",
+			runpod.WithBaseURL("http://runpod.test"),
+			runpod.WithMaxRetryAttempts(3),
+			runpod.WithRetryDelay(time.Millisecond),
+			runpod.WithHTTPClient(&http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+				if atomic.AddInt32(&attempts, 1) == 1 {
+					return nil, io.EOF
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody, Request: r}, nil
+			})}),
+		)
+
+		if err := client.Get(context.Background(), "/pods", nil); err != nil {
+			t.Fatalf("expected GET retry to succeed: %v", err)
+		}
+		if got := atomic.LoadInt32(&attempts); got != 2 {
+			t.Fatalf("expected 2 GET attempts, got %d", got)
+		}
+	})
+}
+
 // The Is* helpers must see through fmt.Errorf("%w") wrapping, which every
 // SDK method applies before returning.
 func TestErrorHelpersSeeThroughWrapping(t *testing.T) {
@@ -132,7 +181,8 @@ func TestNewClientEmptyKey(t *testing.T) {
 	}
 }
 
-// A Retry-After header on 429 must be honored as the retry wait.
+// A 429 explicitly rejects the request before processing, so even POST may
+// retry after the server's Retry-After delay.
 func TestRetryAfterHonoredOn429(t *testing.T) {
 	var hits int32
 	var firstRetryDelay time.Duration
@@ -160,7 +210,7 @@ func TestRetryAfterHonoredOn429(t *testing.T) {
 		runpod.WithRetryDelay(time.Millisecond), // backoff would be ~1ms without Retry-After
 	)
 
-	if _, err := client.GetPod(context.Background(), "pod1"); err != nil {
+	if err := client.Post(context.Background(), "/pods", map[string]string{"name": "pod"}, nil); err != nil {
 		t.Fatalf("expected retry to succeed, got %v", err)
 	}
 	if got := atomic.LoadInt32(&hits); got != 2 {
