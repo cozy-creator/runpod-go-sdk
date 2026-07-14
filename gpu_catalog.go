@@ -29,16 +29,22 @@ var gpuCatalog = []GPUSpec{
 	// Consumer (GeForce) — cheapest first
 	{ID: "NVIDIA GeForce RTX 3070", DisplayName: "RTX 3070", VRAMGB: 8, SMCapability: 86, Consumer: true},
 	{ID: "NVIDIA GeForce RTX 3080", DisplayName: "RTX 3080", VRAMGB: 10, SMCapability: 86, Consumer: true},
+	{ID: "NVIDIA GeForce RTX 3080 Ti", DisplayName: "RTX 3080 Ti", VRAMGB: 12, SMCapability: 86, Consumer: true},
 	{ID: "NVIDIA GeForce RTX 4070 Ti", DisplayName: "RTX 4070 Ti", VRAMGB: 12, SMCapability: 89, Consumer: true},
 	{ID: "NVIDIA GeForce RTX 4080", DisplayName: "RTX 4080", VRAMGB: 16, SMCapability: 89, Consumer: true},
 	{ID: "NVIDIA GeForce RTX 3090", DisplayName: "RTX 3090", VRAMGB: 24, SMCapability: 86, Consumer: true},
+	{ID: "NVIDIA GeForce RTX 3090 Ti", DisplayName: "RTX 3090 Ti", VRAMGB: 24, SMCapability: 86, Consumer: true},
 	{ID: "NVIDIA GeForce RTX 4090", DisplayName: "RTX 4090", VRAMGB: 24, SMCapability: 89, Consumer: true},
+	{ID: "NVIDIA GeForce RTX 5080", DisplayName: "RTX 5080", VRAMGB: 16, SMCapability: 120, Consumer: true},
 	{ID: "NVIDIA GeForce RTX 5090", DisplayName: "RTX 5090", VRAMGB: 32, SMCapability: 120, Consumer: true},
 
 	// Workstation / datacenter — Ampere and Ada
 	{ID: "NVIDIA RTX A4000", DisplayName: "RTX A4000", VRAMGB: 16, SMCapability: 86},
+	{ID: "NVIDIA RTX A4500", DisplayName: "RTX A4500", VRAMGB: 20, SMCapability: 86},
 	{ID: "NVIDIA RTX A5000", DisplayName: "RTX A5000", VRAMGB: 24, SMCapability: 86},
 	{ID: "NVIDIA L4", DisplayName: "L4", VRAMGB: 24, SMCapability: 89},
+	{ID: "NVIDIA RTX 4000 Ada Generation", DisplayName: "RTX 4000 Ada", VRAMGB: 20, SMCapability: 89},
+	{ID: "NVIDIA RTX 5000 Ada Generation", DisplayName: "RTX 5000 Ada", VRAMGB: 32, SMCapability: 89},
 	{ID: "NVIDIA RTX A6000", DisplayName: "RTX A6000", VRAMGB: 48, SMCapability: 86},
 	{ID: "NVIDIA A40", DisplayName: "A40", VRAMGB: 48, SMCapability: 86},
 	{ID: "NVIDIA L40", DisplayName: "L40", VRAMGB: 48, SMCapability: 89},
@@ -46,9 +52,15 @@ var gpuCatalog = []GPUSpec{
 	{ID: "NVIDIA RTX 6000 Ada Generation", DisplayName: "RTX 6000 Ada", VRAMGB: 48, SMCapability: 89},
 
 	// Blackwell workstation
+	{ID: "NVIDIA RTX PRO 4000 Blackwell", DisplayName: "RTX PRO 4000", VRAMGB: 24, SMCapability: 120},
+	{ID: "NVIDIA RTX PRO 4500 Blackwell", DisplayName: "RTX PRO 4500", VRAMGB: 32, SMCapability: 120},
+	{ID: "NVIDIA RTX PRO 5000 Blackwell", DisplayName: "RTX PRO 5000", VRAMGB: 48, SMCapability: 120},
+	{ID: "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition", DisplayName: "RTX PRO 6000 MaxQ", VRAMGB: 96, SMCapability: 120},
+	{ID: "NVIDIA RTX PRO 6000 Blackwell Server Edition", DisplayName: "RTX PRO 6000", VRAMGB: 96, SMCapability: 120},
 	{ID: "NVIDIA RTX PRO 6000 Blackwell Workstation Edition", DisplayName: "RTX PRO 6000 Blackwell", VRAMGB: 96, SMCapability: 120},
 
 	// Datacenter accelerators
+	{ID: "NVIDIA A100-SXM4-40GB", DisplayName: "A100 SXM 40GB", VRAMGB: 40, SMCapability: 80},
 	{ID: "NVIDIA A100 80GB PCIe", DisplayName: "A100 PCIe 80GB", VRAMGB: 80, SMCapability: 80},
 	{ID: "NVIDIA A100-SXM4-80GB", DisplayName: "A100 SXM4 80GB", VRAMGB: 80, SMCapability: 80},
 	{ID: "NVIDIA H100 PCIe", DisplayName: "H100 PCIe", VRAMGB: 80, SMCapability: 90},

@@ -12,10 +12,29 @@ func TestGPUCatalogSelection(t *testing.T) {
 		t.Fatal("catalog is empty")
 	}
 
-	// Blackwell SKUs must be present.
-	for _, id := range []string{"NVIDIA B200", "NVIDIA GeForce RTX 5090"} {
-		if _, ok := runpod.GPUSpecByID(id); !ok {
-			t.Errorf("catalog missing %q", id)
+	// Hardware facts for the CUDA 13 placement set match RunPod's live IDs.
+	wantSpecs := []runpod.GPUSpec{
+		{ID: "NVIDIA B200", DisplayName: "B200", VRAMGB: 180, SMCapability: 100},
+		{ID: "NVIDIA A100-SXM4-40GB", DisplayName: "A100 SXM 40GB", VRAMGB: 40, SMCapability: 80},
+		{ID: "NVIDIA GeForce RTX 3080 Ti", DisplayName: "RTX 3080 Ti", VRAMGB: 12, SMCapability: 86, Consumer: true},
+		{ID: "NVIDIA GeForce RTX 3090 Ti", DisplayName: "RTX 3090 Ti", VRAMGB: 24, SMCapability: 86, Consumer: true},
+		{ID: "NVIDIA GeForce RTX 5080", DisplayName: "RTX 5080", VRAMGB: 16, SMCapability: 120, Consumer: true},
+		{ID: "NVIDIA GeForce RTX 5090", DisplayName: "RTX 5090", VRAMGB: 32, SMCapability: 120, Consumer: true},
+		{ID: "NVIDIA RTX 4000 Ada Generation", DisplayName: "RTX 4000 Ada", VRAMGB: 20, SMCapability: 89},
+		{ID: "NVIDIA RTX 5000 Ada Generation", DisplayName: "RTX 5000 Ada", VRAMGB: 32, SMCapability: 89},
+		{ID: "NVIDIA RTX A4500", DisplayName: "RTX A4500", VRAMGB: 20, SMCapability: 86},
+		{ID: "NVIDIA RTX PRO 4000 Blackwell", DisplayName: "RTX PRO 4000", VRAMGB: 24, SMCapability: 120},
+		{ID: "NVIDIA RTX PRO 4500 Blackwell", DisplayName: "RTX PRO 4500", VRAMGB: 32, SMCapability: 120},
+		{ID: "NVIDIA RTX PRO 5000 Blackwell", DisplayName: "RTX PRO 5000", VRAMGB: 48, SMCapability: 120},
+		{ID: "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition", DisplayName: "RTX PRO 6000 MaxQ", VRAMGB: 96, SMCapability: 120},
+		{ID: "NVIDIA RTX PRO 6000 Blackwell Server Edition", DisplayName: "RTX PRO 6000", VRAMGB: 96, SMCapability: 120},
+	}
+	for _, want := range wantSpecs {
+		got, ok := runpod.GPUSpecByID(want.ID)
+		if !ok {
+			t.Errorf("catalog missing %q", want.ID)
+		} else if got != want {
+			t.Errorf("catalog spec for %q = %+v, want %+v", want.ID, got, want)
 		}
 	}
 
