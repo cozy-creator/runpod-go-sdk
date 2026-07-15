@@ -166,6 +166,21 @@ func TestFallback_SingleTypeNoCapacityTyped(t *testing.T) {
 	}
 }
 
+func TestFallback_LiveCurrentlyAvailableWordingIsNoCapacity(t *testing.T) {
+	server, _ := newFallbackServer(t,
+		map[string]int{"NVIDIA GeForce RTX 3080 Ti": 500},
+		`{"error":"create pod: There are no instances currently available."}`)
+	defer server.Close()
+
+	_, err := fallbackClient(t, server.URL).CreatePod(
+		context.Background(),
+		baseGPURequest("NVIDIA GeForce RTX 3080 Ti"),
+	)
+	if !errors.Is(err, runpod.ErrNoCapacity) {
+		t.Fatalf("live RunPod stock-out must match ErrNoCapacity, got %v", err)
+	}
+}
+
 func TestFallback_PlainServerErrorNotCapacityButContinues(t *testing.T) {
 	server, attempted := newFallbackServer(t,
 		map[string]int{"A": 502, "B": 0},

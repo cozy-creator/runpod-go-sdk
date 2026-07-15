@@ -11,6 +11,7 @@ import (
 // alone cannot distinguish "no stock" from a real server fault.
 var noCapacityMessages = []string{
 	"no instances available",
+	"no instances currently available",
 	"no longer any instances available",
 	"no resources available",
 	"no resources",
