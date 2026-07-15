@@ -1,7 +1,8 @@
 // Package runpodtest provides an in-process fake RunPod API server for
 // consumer tests. It implements the endpoints the SDK covers — pods CRUD
 // with per-GPU-type stock-out injection, network volumes, container registry
-// auths, the serverless job lifecycle, and the GraphQL gpuTypes query — plus
+// auths, the serverless job lifecycle, and GraphQL gpuTypes/pod lifecycle
+// queries — plus
 // one-shot fault injection (429/500) for retry-path testing.
 //
 // Usage:
@@ -41,15 +42,16 @@ type fault struct {
 type Server struct {
 	httpServer *httptest.Server
 
-	mu       sync.Mutex
-	nextID   int
-	pods     map[string]*runpod.Pod
-	volumes  map[string]*runpod.NetworkVolume
-	auths    map[string]*runpod.ContainerRegistryAuth
-	jobs     map[string]*fakeJob // key: endpointID + "/" + jobID
-	stockOut map[string]bool     // GPU type ID -> out of stock
-	gpuTypes []runpod.GPUType
-	faults   []fault // queued one-shot injected responses
+	mu        sync.Mutex
+	nextID    int
+	pods      map[string]*runpod.Pod
+	volumes   map[string]*runpod.NetworkVolume
+	auths     map[string]*runpod.ContainerRegistryAuth
+	jobs      map[string]*fakeJob // key: endpointID + "/" + jobID
+	stockOut  map[string]bool     // GPU type ID -> out of stock
+	gpuTypes  []runpod.GPUType
+	lifecycle map[string]*runpod.PodLifecycleObservation
+	faults    []fault // queued one-shot injected responses
 }
 
 type fakeJob struct {
@@ -64,11 +66,12 @@ type fakeJob struct {
 // New starts a fake RunPod server. Call Close when done.
 func New() *Server {
 	s := &Server{
-		pods:     map[string]*runpod.Pod{},
-		volumes:  map[string]*runpod.NetworkVolume{},
-		auths:    map[string]*runpod.ContainerRegistryAuth{},
-		jobs:     map[string]*fakeJob{},
-		stockOut: map[string]bool{},
+		pods:      map[string]*runpod.Pod{},
+		volumes:   map[string]*runpod.NetworkVolume{},
+		auths:     map[string]*runpod.ContainerRegistryAuth{},
+		jobs:      map[string]*fakeJob{},
+		stockOut:  map[string]bool{},
+		lifecycle: map[string]*runpod.PodLifecycleObservation{},
 	}
 	// Default GPU catalog for gpuTypes queries; override with SetGPUTypes.
 	for _, spec := range runpod.GPUCatalog() {
@@ -146,6 +149,19 @@ func (s *Server) AddPod(pod *runpod.Pod) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pods[pod.ID] = pod
+}
+
+// SetPodLifecycleObservation sets the GraphQL lifecycle view for a pod.
+// When unset, the fake derives desired status and last-start time from AddPod.
+func (s *Server) SetPodLifecycleObservation(observation *runpod.PodLifecycleObservation) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	copy := *observation
+	if observation.LatestTelemetry != nil {
+		telemetry := *observation.LatestTelemetry
+		copy.LatestTelemetry = &telemetry
+	}
+	s.lifecycle[observation.PodID] = &copy
 }
 
 // Pod returns a seeded/created pod by ID, or nil.
@@ -544,7 +560,7 @@ func (s *Server) handleServerless(w http.ResponseWriter, r *http.Request, path s
 	}
 }
 
-// --- GraphQL (gpuTypes) ---
+// --- GraphQL ---
 
 func (s *Server) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -555,9 +571,47 @@ func (s *Server) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid graphql request")
 		return
 	}
+	if strings.Contains(req.Query, "pod(input:") {
+		input, _ := req.Variables["input"].(map[string]interface{})
+		podID, _ := input["podId"].(string)
+		s.mu.Lock()
+		observation := s.lifecycle[podID]
+		pod := s.pods[podID]
+		if observation != nil {
+			copy := *observation
+			if observation.LatestTelemetry != nil {
+				telemetry := *observation.LatestTelemetry
+				copy.LatestTelemetry = &telemetry
+			}
+			observation = &copy
+		} else if pod != nil {
+			observation = &runpod.PodLifecycleObservation{
+				PodID:         pod.ID,
+				DesiredStatus: pod.DesiredStatus,
+				LastStartedAt: pod.LastStartedAt,
+			}
+		}
+		s.mu.Unlock()
+
+		if observation == nil {
+			writeJSON(w, http.StatusOK, map[string]interface{}{"data": map[string]interface{}{"pod": nil}})
+			return
+		}
+		result := map[string]interface{}{
+			"id":              observation.PodID,
+			"desiredStatus":   observation.DesiredStatus,
+			"lastStartedAt":   observation.LastStartedAt,
+			"latestTelemetry": observation.LatestTelemetry,
+		}
+		if observation.RuntimeUptimeInSeconds != nil {
+			result["runtime"] = map[string]interface{}{"uptimeInSeconds": observation.RuntimeUptimeInSeconds}
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"data": map[string]interface{}{"pod": result}})
+		return
+	}
 	if !strings.Contains(req.Query, "gpuTypes") {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"errors": []map[string]string{{"message": "runpodtest: only gpuTypes queries are supported"}},
+			"errors": []map[string]string{{"message": "runpodtest: unsupported GraphQL query"}},
 		})
 		return
 	}
