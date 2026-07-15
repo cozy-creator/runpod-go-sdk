@@ -181,6 +181,12 @@ type CreatePodRequest struct {
 	GPUTypeIDs []string `json:"gpuTypeIds,omitempty"`
 	GPUCount   int      `json:"gpuCount,omitempty"`
 
+	// MinRAMPerGPU and MinVCPUPerGPU constrain the minimum host resources
+	// allocated per attached GPU. They are GPU-only; zero leaves RunPod's
+	// defaults in effect.
+	MinRAMPerGPU  int `json:"minRAMPerGPU,omitempty"`  // GB
+	MinVCPUPerGPU int `json:"minVCPUPerGPU,omitempty"` // virtual CPUs
+
 	// CPU placement (ComputeType="CPU"). CPUFlavorIDs is a fallback-ordered
 	// list of acceptable CPU family IDs (e.g., "cpu5c", "cpu3c", "cpu3g");
 	// RunPod picks the first available. Optional — if omitted, RunPod

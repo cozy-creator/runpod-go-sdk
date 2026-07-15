@@ -125,6 +125,24 @@ func TestValidateCreatePodRequest_CPU_ForbidsGPUFields(t *testing.T) {
 			},
 			want: "gpuCount",
 		},
+		{
+			name: "MinRAMPerGPU forbidden",
+			req: &CreatePodRequest{
+				Name: "n", ImageName: "img", ContainerDiskInGB: 10,
+				ComputeType:  "CPU",
+				MinRAMPerGPU: 32,
+			},
+			want: "minRAMPerGPU",
+		},
+		{
+			name: "MinVCPUPerGPU forbidden",
+			req: &CreatePodRequest{
+				Name: "n", ImageName: "img", ContainerDiskInGB: 10,
+				ComputeType:   "CPU",
+				MinVCPUPerGPU: 8,
+			},
+			want: "minVCPUPerGPU",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -134,6 +152,51 @@ func TestValidateCreatePodRequest_CPU_ForbidsGPUFields(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("expected error to mention %q, got %q", tc.want, err.Error())
+			}
+		})
+	}
+}
+
+func TestValidateCreatePodRequest_GPUResourceMinima(t *testing.T) {
+	c := newValidationClient()
+	base := CreatePodRequest{
+		Name:              "n",
+		ImageName:         "img",
+		ContainerDiskInGB: 10,
+		GPUTypeIDs:        []string{"NVIDIA GeForce RTX 4090"},
+		GPUCount:          1,
+	}
+
+	valid := base
+	valid.MinRAMPerGPU = 32
+	valid.MinVCPUPerGPU = 8
+	if err := c.validateCreatePodRequest(&valid); err != nil {
+		t.Fatalf("positive GPU resource minima should pass validation: %v", err)
+	}
+
+	cases := []struct {
+		name  string
+		field string
+		set   func(*CreatePodRequest)
+	}{
+		{
+			name:  "negative RAM",
+			field: "minRAMPerGPU",
+			set:   func(req *CreatePodRequest) { req.MinRAMPerGPU = -1 },
+		},
+		{
+			name:  "negative vCPU",
+			field: "minVCPUPerGPU",
+			set:   func(req *CreatePodRequest) { req.MinVCPUPerGPU = -1 },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := base
+			tc.set(&req)
+			err := c.validateCreatePodRequest(&req)
+			if err == nil || !strings.Contains(err.Error(), tc.field) {
+				t.Fatalf("expected %s validation error, got %v", tc.field, err)
 			}
 		})
 	}
