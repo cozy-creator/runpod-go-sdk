@@ -52,6 +52,8 @@ Retries: GETs and other idempotent requests retry on 5xx/429 with exponential ba
 | `CreatePodWithFallback` | Explicit per-GPU-type fan-out with filter/failure hooks |
 | `CreateSpotPod` | Create an interruptible (spot) pod |
 | `GetPod` / `GetPodWithOptions` | Fetch a pod (optional `includeMachine`, `includeNetworkVolume`, ...) |
+| `GetPodLifecycleObservation` | Read desired state, start generation, and latest provider telemetry through GraphQL |
+| `GetPodTerminalError` | Classify REST terminal states or fresh current-generation `exited` telemetry |
 | `ListPods` | List pods with pagination |
 | `StopPod` / `ResumePod` / `TerminatePod` | Lifecycle |
 | `WaitForPodReady` | Poll until runtime is up; returns startup-timing decomposition |
@@ -170,6 +172,7 @@ Secrets: `CreateSecret` / `GetSecret` / `UpdateSecret` / `CreateOrUpdateSecret` 
 | Resource | Transport | Coverage |
 |----------|-----------|----------|
 | Pods (CRUD, stop/resume, fallback, timing, diagnostics) | REST | Full |
+| Pod lifecycle observation | GraphQL | Query only |
 | Serverless jobs (run/runsync/status/cancel/retry/purge/health/stream) | REST (api.runpod.ai) | Full |
 | GPU types / availability / offers | GraphQL | Query only |
 | Network volumes | REST | Full CRUD |

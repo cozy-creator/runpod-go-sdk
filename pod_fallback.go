@@ -15,6 +15,7 @@ var noCapacityMessages = []string{
 	"no longer any instances available",
 	"no resources available",
 	"no resources",
+	"does not have the resources to deploy your pod",
 	"not enough free gpus",
 }
 

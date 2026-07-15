@@ -16,8 +16,10 @@ import (
 //   - REST GET /pods/{id}: desiredStatus (RUNNING|EXITED|TERMINATED) plus
 //     lastStatusChange — free text that for failures reads just
 //     "Exited by Runpod: <ts>" with NO error class.
-//   - GraphQL pod{...}: the same fields; no event/error fields exist
-//     (probed exhaustively 2026-07; introspection disabled).
+//   - GraphQL pod{...}: desiredStatus plus current lastStartedAt and
+//     latestTelemetry{state,time}; telemetry can expose a current-generation
+//     container exit while REST desiredStatus is still RUNNING, but carries
+//     no provider error class.
 //   - The console/email texts ("Pod initialization error ...
 //     IMAGE_AUTH_ERROR:unauthorized", "IMAGE_NOT_FOUND") come from RunPod's
 //     session-authed system-log service (hapi.runpod.net) and CSR-scoped
@@ -112,7 +114,7 @@ func ClassifyPodErrorMessage(msg string) PodErrorClass {
 // GetPodTerminalError reports whether the pod is terminally dead without
 // having served, and classifies why. Returns (nil, false, nil) while the pod
 // is alive or still initializing; (verdict, true, nil) for a terminal state;
-// error only for API failures other than the pod-missing 404.
+// error for provider API failures other than a REST pod-missing 404.
 func (c *Client) GetPodTerminalError(ctx context.Context, podID string, opts *PodTerminalErrorOptions) (*PodTerminalError, bool, error) {
 	if err := c.validateRequired("podID", podID); err != nil {
 		return nil, false, err
@@ -131,16 +133,31 @@ func (c *Client) GetPodTerminalError(ctx context.Context, podID string, opts *Po
 		}
 		return nil, false, err
 	}
-	switch strings.ToUpper(strings.TrimSpace(pod.DesiredStatus)) {
-	case "EXITED", "TERMINATED", "DEAD":
-	default:
-		return nil, false, nil
+	providerDetail := ""
+	if !isTerminalPodStatus(pod.DesiredStatus) {
+		observation, err := c.GetPodLifecycleObservation(ctx, podID)
+		if err != nil {
+			return nil, false, err
+		}
+		switch {
+		case isTerminalPodStatus(observation.DesiredStatus):
+			providerDetail = "GraphQL desired status " + strings.TrimSpace(observation.DesiredStatus)
+		case hasFreshTerminalTelemetry(observation):
+			providerDetail = "provider telemetry state exited at " + observation.LatestTelemetry.Time.Time.UTC().Format(time.RFC3339Nano) +
+				" for start generation " + observation.LastStartedAt.Time.UTC().Format(time.RFC3339Nano)
+		default:
+			return nil, false, nil
+		}
+	}
+	message := strings.TrimSpace(pod.LastStatusChange)
+	if providerDetail != "" {
+		message = strings.TrimSpace(message + "; " + providerDetail)
 	}
 
 	verdict := &PodTerminalError{
 		PodID:         podID,
 		Reason:        "pod_exited",
-		Message:       strings.TrimSpace(pod.LastStatusChange),
+		Message:       message,
 		ImageRef:      strings.TrimSpace(pod.ImageName),
 		Interruptible: pod.Interruptible,
 		ObservedAt:    time.Now().UTC(),

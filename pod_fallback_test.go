@@ -181,6 +181,25 @@ func TestFallback_LiveCurrentlyAvailableWordingIsNoCapacity(t *testing.T) {
 	}
 }
 
+func TestFallback_LiveMachineResourcesWordingIsNoCapacity(t *testing.T) {
+	server, _ := newFallbackServer(t,
+		map[string]int{"NVIDIA GeForce RTX 4090": 500},
+		`{"error":"This machine does not have the resources to deploy your pod. Please try a different machine"}`)
+	defer server.Close()
+
+	_, err := fallbackClient(t, server.URL).CreatePod(
+		context.Background(),
+		baseGPURequest("NVIDIA GeForce RTX 4090"),
+	)
+	if !errors.Is(err, runpod.ErrNoCapacity) {
+		t.Fatalf("live RunPod resource exhaustion must match ErrNoCapacity, got %v", err)
+	}
+	var noCap *runpod.NoCapacityError
+	if !errors.As(err, &noCap) || noCap.GPUTypeID != "NVIDIA GeForce RTX 4090" {
+		t.Fatalf("expected typed capacity error for RTX 4090, got %v", err)
+	}
+}
+
 func TestFallback_PlainServerErrorNotCapacityButContinues(t *testing.T) {
 	server, attempted := newFallbackServer(t,
 		map[string]int{"A": 502, "B": 0},
