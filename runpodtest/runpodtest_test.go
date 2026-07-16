@@ -171,6 +171,66 @@ func TestVolumeAndRegistryAuthCRUD(t *testing.T) {
 	}
 }
 
+func TestNetworkVolumePodAttachment(t *testing.T) {
+	srv := runpodtest.New()
+	defer srv.Close()
+	client := srv.MustClient()
+	ctx := context.Background()
+
+	volume, err := client.CreateNetworkVolume(ctx, &runpod.CreateNetworkVolumeRequest{
+		Name: "endpoint-cache", Size: 100, DataCenterID: "US-KS-2",
+	})
+	if err != nil {
+		t.Fatalf("CreateNetworkVolume: %v", err)
+	}
+	pod, err := client.CreatePod(ctx, &runpod.CreatePodRequest{
+		Name: "worker", ImageName: "image", GPUTypeIDs: []string{"NVIDIA GeForce RTX 4090"},
+		GPUCount: 1, ContainerDiskInGB: 100, CloudType: "SECURE",
+		DataCenterIDs: []string{"US-KS-2"}, NetworkVolumeID: volume.ID,
+		VolumeMountPath: "/runpod-volume",
+	})
+	if err != nil {
+		t.Fatalf("CreatePod: %v", err)
+	}
+	if pod.NetworkVolume == nil || pod.NetworkVolume.ID != volume.ID || pod.NetworkVolumeID != volume.ID {
+		t.Fatalf("attachment identity missing from pod response: %+v", pod)
+	}
+	if pod.Machine == nil || pod.Machine.DataCenterID != "US-KS-2" {
+		t.Fatalf("pod landed outside volume datacenter: %+v", pod.Machine)
+	}
+	if err := client.DeleteNetworkVolume(ctx, volume.ID); err == nil {
+		t.Fatal("attached volume deletion must fail")
+	}
+}
+
+func TestNetworkVolumePodAttachmentRejectsUnsafePlacement(t *testing.T) {
+	srv := runpodtest.New()
+	defer srv.Close()
+	client := srv.MustClient()
+	ctx := context.Background()
+	volume, err := client.CreateNetworkVolume(ctx, &runpod.CreateNetworkVolumeRequest{
+		Name: "endpoint-cache", Size: 100, DataCenterID: "US-KS-2",
+	})
+	if err != nil {
+		t.Fatalf("CreateNetworkVolume: %v", err)
+	}
+	base := runpod.CreatePodRequest{
+		Name: "worker", ImageName: "image", GPUTypeIDs: []string{"NVIDIA GeForce RTX 4090"},
+		GPUCount: 1, ContainerDiskInGB: 100, CloudType: "SECURE",
+		DataCenterIDs: []string{"US-KS-2"}, NetworkVolumeID: volume.ID,
+	}
+	community := base
+	community.CloudType = "COMMUNITY"
+	if _, err := client.CreatePod(ctx, &community); err == nil {
+		t.Fatal("Community Cloud attachment must fail")
+	}
+	wrongDatacenter := base
+	wrongDatacenter.DataCenterIDs = []string{"EU-RO-1"}
+	if _, err := client.CreatePod(ctx, &wrongDatacenter); err == nil {
+		t.Fatal("cross-datacenter attachment must fail")
+	}
+}
+
 func TestFaultInjection(t *testing.T) {
 	srv := runpodtest.New()
 	defer srv.Close()

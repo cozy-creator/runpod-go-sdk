@@ -151,6 +151,28 @@ func (s *Server) AddPod(pod *runpod.Pod) {
 	s.pods[pod.ID] = pod
 }
 
+// AddNetworkVolume seeds a provider-owned network volume. The fake enforces
+// the same create-time Secure Cloud and datacenter attachment constraints as
+// RunPod, so consumer tests exercise their real placement intent.
+func (s *Server) AddNetworkVolume(volume *runpod.NetworkVolume) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	copy := *volume
+	s.volumes[copy.ID] = &copy
+}
+
+// NetworkVolume returns a copy of a seeded/created network volume, or nil.
+func (s *Server) NetworkVolume(id string) *runpod.NetworkVolume {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	volume := s.volumes[id]
+	if volume == nil {
+		return nil
+	}
+	copy := *volume
+	return &copy
+}
+
 // SetPodLifecycleObservation sets the GraphQL lifecycle view for a pod.
 // When unset, the fake derives desired status and last-start time from AddPod.
 func (s *Server) SetPodLifecycleObservation(observation *runpod.PodLifecycleObservation) {
@@ -276,6 +298,27 @@ func (s *Server) handlePods(w http.ResponseWriter, r *http.Request, path string)
 				return
 			}
 		}
+		var attached *runpod.NetworkVolume
+		if volumeID := strings.TrimSpace(req.NetworkVolumeID); volumeID != "" {
+			volume := s.volumes[volumeID]
+			if volume == nil {
+				s.mu.Unlock()
+				writeErr(w, http.StatusBadRequest, "network volume not found")
+				return
+			}
+			if !strings.EqualFold(strings.TrimSpace(req.CloudType), "SECURE") {
+				s.mu.Unlock()
+				writeErr(w, http.StatusBadRequest, "network volumes require Secure Cloud")
+				return
+			}
+			if len(req.DataCenterIDs) != 1 || strings.TrimSpace(req.DataCenterIDs[0]) != strings.TrimSpace(volume.DataCenterID) {
+				s.mu.Unlock()
+				writeErr(w, http.StatusBadRequest, "network volume datacenter mismatch")
+				return
+			}
+			copy := *volume
+			attached = &copy
+		}
 		pod := &runpod.Pod{
 			ID:                s.newID("pod"),
 			Name:              req.Name,
@@ -285,9 +328,15 @@ func (s *Server) handlePods(w http.ResponseWriter, r *http.Request, path string)
 			ContainerDiskInGB: req.ContainerDiskInGB,
 			Interruptible:     req.Interruptible,
 			Env:               req.Env,
+			VolumeMountPath:   req.VolumeMountPath,
+			NetworkVolumeID:   req.NetworkVolumeID,
+			NetworkVolume:     attached,
 		}
 		if len(req.GPUTypeIDs) > 0 {
 			pod.Machine = &runpod.Machine{ID: s.newID("machine"), GPUTypeID: req.GPUTypeIDs[0]}
+			if len(req.DataCenterIDs) > 0 {
+				pod.Machine.DataCenterID = strings.TrimSpace(req.DataCenterIDs[0])
+			}
 		}
 		s.pods[pod.ID] = pod
 		s.mu.Unlock()
@@ -404,6 +453,13 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request, path stri
 			writeJSON(w, http.StatusOK, vol)
 		case http.MethodDelete:
 			s.mu.Lock()
+			for _, pod := range s.pods {
+				if strings.TrimSpace(pod.NetworkVolumeID) == volID {
+					s.mu.Unlock()
+					writeErr(w, http.StatusConflict, "network volume is attached to a pod")
+					return
+				}
+			}
 			delete(s.volumes, volID)
 			s.mu.Unlock()
 			w.WriteHeader(http.StatusNoContent)
