@@ -3,6 +3,7 @@ package runpod_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -26,6 +27,9 @@ func TestListGPUOffers(t *testing.T) {
 		if req.Variables["gpuCount"] != float64(2) {
 			t.Fatalf("gpuCount variable not passed: %v", req.Variables)
 		}
+		if req.Variables["dataCenterId"] != "US-KS-2" || req.Variables["minMemoryInGb"] != float64(64) || req.Variables["minVcpuCount"] != float64(8) {
+			t.Fatalf("lowestPrice variables = %#v", req.Variables)
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"gpuTypes":[
@@ -43,7 +47,9 @@ func TestListGPUOffers(t *testing.T) {
 	defer server.Close()
 
 	client := mustClient(t, "test_key", runpod.WithGraphQLBaseURL(server.URL))
-	offers, err := client.ListGPUOffers(context.Background(), &runpod.GPUOfferFilter{GPUCount: 2, InStockOnly: true})
+	offers, err := client.ListGPUOffers(context.Background(), &runpod.GPUOfferFilter{
+		GPUCount: 2, InStockOnly: true, DataCenterID: "US-KS-2", MinMemoryInGB: 64, MinVCPUCount: 8,
+	})
 	if err != nil {
 		t.Fatalf("ListGPUOffers: %v", err)
 	}
@@ -61,6 +67,20 @@ func TestListGPUOffers(t *testing.T) {
 	}
 	if offers[2].GPUTypeID != "gpu-secure-only" || offers[2].MinimumBidPrice != 1.0 {
 		t.Errorf("third offer wrong: %+v", offers[2])
+	}
+	for _, offer := range offers {
+		if offer.GPUCount != 2 {
+			t.Fatalf("offer GPUCount = %d, want 2: %+v", offer.GPUCount, offer)
+		}
+	}
+}
+
+func TestListGPUOffersRejectsInvalidShape(t *testing.T) {
+	client := mustClient(t, "test_key")
+	_, err := client.ListGPUOffers(t.Context(), &runpod.GPUOfferFilter{MinDisk: -1})
+	var validation *runpod.ValidationError
+	if !errors.As(err, &validation) || validation.Field != "minDisk" {
+		t.Fatalf("error = %v", err)
 	}
 }
 

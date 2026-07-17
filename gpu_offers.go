@@ -8,22 +8,27 @@ import (
 )
 
 // GPUOffer is one purchasable combination of GPU type and cloud, with
-// current stock and pricing. Datacenter granularity is not exposed by
-// RunPod's lowestPrice query; constrain placement with
-// CreatePodRequest.DataCenterIDs instead.
+// current stock and pricing. When GPUOfferFilter.DataCenterID is set, the
+// quote is scoped to that exact data center.
 type GPUOffer struct {
 	GPUTypeID   string
 	DisplayName string
 	MemoryInGB  int
 	CloudType   string // "SECURE" or "COMMUNITY"
+	// GPUCount is the whole-pod count used to obtain both prices below.
+	GPUCount    int
 	StockStatus string
 	// OnDemandPrice is the uninterruptible USD/hr price.
 	OnDemandPrice float64
-	// MinimumBidPrice is the current spot-market floor (USD/hr per GPU);
-	// use it as CreatePodRequest.BidPerGPU guidance. RunPod no longer
+	// MinimumBidPrice is the aggregate spot-market floor for GPUCount GPUs.
+	// REST CreatePodRequest.BidPerGPU expects a per-GPU number, so callers
+	// must divide this value by GPUCount before using it there. RunPod no longer
 	// reports a separate interruptible/spot price on LowestPrice — this
 	// floor is the only spot pricing signal exposed.
 	MinimumBidPrice float64
+	// AvailableGPUCounts is the set of whole-pod GPU counts currently
+	// reported for this exact GPU type/cloud price surface.
+	AvailableGPUCounts []int
 }
 
 // GPUOfferFilter constrains ListGPUOffers. Zero value = all offers for one
@@ -32,7 +37,16 @@ type GPUOfferFilter struct {
 	// GPUCount prices the offer for this many GPUs per pod (default 1).
 	GPUCount int
 	// MinCudaVersion filters to machines with at least this CUDA version.
-	MinCudaVersion string
+	MinCudaVersion      string
+	AllowedCudaVersions []string
+	// DataCenterID restricts lowestPrice to one exact RunPod data center.
+	// The API also accepts comma-separated IDs, but exact-placement callers
+	// should pass one.
+	DataCenterID  string
+	MinMemoryInGB int
+	MinVCPUCount  int
+	MinDisk       int
+	TotalDisk     int
 	// IDs filters to specific GPU type IDs.
 	IDs []string
 	// InStockOnly drops offers whose stock status is unavailable.
@@ -54,13 +68,26 @@ type graphQLGPUOfferPayload struct {
 // ListGPUOffers returns per-(GPU type x cloud) stock and pricing in one
 // call, sorted by on-demand price ascending. This is the placement-decision
 // view that connects the catalog to pod creation: pick an offer, then set
-// GPUTypeIDs/CloudType (and BidPerGPU for spot) on the CreatePodRequest.
+// GPUTypeIDs/CloudType/DataCenterIDs (and a per-GPU BidPerGPU for spot) on
+// the CreatePodRequest.
 func (c *Client) ListGPUOffers(ctx context.Context, filter *GPUOfferFilter) ([]GPUOffer, error) {
 	gpuCount := 1
 	minCUDA := ""
 	inStockOnly := false
 	idSet := map[string]struct{}{}
 	if filter != nil {
+		switch {
+		case filter.GPUCount < 0:
+			return nil, NewValidationError("gpuCount", "cannot be negative")
+		case filter.MinMemoryInGB < 0:
+			return nil, NewValidationError("minMemoryInGb", "cannot be negative")
+		case filter.MinVCPUCount < 0:
+			return nil, NewValidationError("minVcpuCount", "cannot be negative")
+		case filter.MinDisk < 0:
+			return nil, NewValidationError("minDisk", "cannot be negative")
+		case filter.TotalDisk < 0:
+			return nil, NewValidationError("totalDisk", "cannot be negative")
+		}
 		if filter.GPUCount > 0 {
 			gpuCount = filter.GPUCount
 		}
@@ -74,22 +101,24 @@ func (c *Client) ListGPUOffers(ctx context.Context, filter *GPUOfferFilter) ([]G
 	}
 
 	query := `
-query($gpuCount: Int!, $minCudaVersion: String) {
+query($gpuCount: Int!, $minCudaVersion: String, $allowedCudaVersions: [String], $dataCenterId: String, $minMemoryInGb: Int, $minVcpuCount: Int, $minDisk: Int, $totalDisk: Int) {
   gpuTypes {
     id
     displayName
     memoryInGb
     secureCloud
     communityCloud
-    secure: lowestPrice(input: { gpuCount: $gpuCount, minCudaVersion: $minCudaVersion, secureCloud: true }) {
+    secure: lowestPrice(input: { gpuCount: $gpuCount, minCudaVersion: $minCudaVersion, allowedCudaVersions: $allowedCudaVersions, dataCenterId: $dataCenterId, minMemoryInGb: $minMemoryInGb, minVcpuCount: $minVcpuCount, minDisk: $minDisk, totalDisk: $totalDisk, secureCloud: true }) {
       minimumBidPrice
       uninterruptablePrice
       stockStatus
+      availableGpuCounts
     }
-    community: lowestPrice(input: { gpuCount: $gpuCount, minCudaVersion: $minCudaVersion, secureCloud: false }) {
+    community: lowestPrice(input: { gpuCount: $gpuCount, minCudaVersion: $minCudaVersion, allowedCudaVersions: $allowedCudaVersions, dataCenterId: $dataCenterId, minMemoryInGb: $minMemoryInGb, minVcpuCount: $minVcpuCount, minDisk: $minDisk, totalDisk: $totalDisk, secureCloud: false }) {
       minimumBidPrice
       uninterruptablePrice
       stockStatus
+      availableGpuCounts
     }
   }
 }`
@@ -97,6 +126,14 @@ query($gpuCount: Int!, $minCudaVersion: String) {
 	variables := map[string]interface{}{
 		"gpuCount":       gpuCount,
 		"minCudaVersion": minCUDA,
+	}
+	if filter != nil {
+		variables["allowedCudaVersions"] = filter.AllowedCudaVersions
+		variables["dataCenterId"] = strings.TrimSpace(filter.DataCenterID)
+		variables["minMemoryInGb"] = filter.MinMemoryInGB
+		variables["minVcpuCount"] = filter.MinVCPUCount
+		variables["minDisk"] = filter.MinDisk
+		variables["totalDisk"] = filter.TotalDisk
 	}
 
 	var payload graphQLGPUOfferPayload
@@ -120,13 +157,15 @@ query($gpuCount: Int!, $minCudaVersion: String) {
 				return
 			}
 			offers = append(offers, GPUOffer{
-				GPUTypeID:       gpu.ID,
-				DisplayName:     gpu.DisplayName,
-				MemoryInGB:      gpu.MemoryInGB,
-				CloudType:       cloud,
-				StockStatus:     status,
-				OnDemandPrice:   price.UninterruptablePrice,
-				MinimumBidPrice: price.MinimumBidPrice,
+				GPUTypeID:          gpu.ID,
+				DisplayName:        gpu.DisplayName,
+				MemoryInGB:         gpu.MemoryInGB,
+				CloudType:          cloud,
+				GPUCount:           gpuCount,
+				StockStatus:        status,
+				OnDemandPrice:      price.UninterruptablePrice,
+				MinimumBidPrice:    price.MinimumBidPrice,
+				AvailableGPUCounts: append([]int(nil), price.AvailableGPUCounts...),
 			})
 		}
 		if gpu.SecureCloud {

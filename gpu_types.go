@@ -38,6 +38,7 @@ query($gpuCount: Int!, $minCudaVersion: String, $allowedCudaVersions: [String!])
       minimumBidPrice
       uninterruptablePrice
       stockStatus
+      availableGpuCounts
     }
   }
 }`
@@ -158,7 +159,7 @@ func filterGPUTypeResults(items []GPUType, filter *GPUTypeFilter) []GPUType {
 
 func isAvailableStockStatus(status string) bool {
 	switch strings.ToUpper(strings.TrimSpace(status)) {
-	case "AVAILABLE", "LOW", "LOW_STOCK", "IN_STOCK", "HIGH":
+	case "AVAILABLE", "LOW", "LOW_STOCK", "IN_STOCK", "MEDIUM", "HIGH":
 		return true
 	default:
 		return false

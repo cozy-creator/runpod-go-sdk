@@ -140,6 +140,29 @@ func TestListAvailableGPUs_OnlyAvailable(t *testing.T) {
 							"stockStatus":          "LOW",
 						},
 					},
+					{
+						"id":             "gpu-4",
+						"displayName":    "GPU 4",
+						"memoryInGb":     48,
+						"secureCloud":    true,
+						"communityCloud": false,
+						"lowestPrice": map[string]interface{}{
+							"uninterruptablePrice": 1.10,
+							"stockStatus":          "Medium",
+							"availableGpuCounts":   []int{1, 2},
+						},
+					},
+					{
+						"id":             "gpu-5",
+						"displayName":    "GPU 5",
+						"memoryInGb":     80,
+						"secureCloud":    true,
+						"communityCloud": false,
+						"lowestPrice": map[string]interface{}{
+							"uninterruptablePrice": 0.50,
+							"stockStatus":          "None",
+						},
+					},
 				},
 			},
 		}
@@ -152,12 +175,15 @@ func TestListAvailableGPUs_OnlyAvailable(t *testing.T) {
 		t.Fatalf("ListAvailableGPUs error: %v", err)
 	}
 
-	if len(got) != 2 {
-		t.Fatalf("expected 2 available GPUs, got %d", len(got))
+	if len(got) != 3 {
+		t.Fatalf("expected 3 available GPUs, got %d", len(got))
 	}
 	// sorted by uninterruptablePrice asc
-	if got[0].ID != "gpu-3" || got[1].ID != "gpu-1" {
-		t.Fatalf("unexpected order: %q then %q", got[0].ID, got[1].ID)
+	if got[0].ID != "gpu-3" || got[1].ID != "gpu-1" || got[2].ID != "gpu-4" {
+		t.Fatalf("unexpected order: %#v", got)
+	}
+	if counts := got[2].LowestPrice.AvailableGPUCounts; len(counts) != 2 || counts[0] != 1 || counts[1] != 2 {
+		t.Fatalf("available GPU counts = %#v", counts)
 	}
 }
 
