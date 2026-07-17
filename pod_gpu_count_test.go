@@ -84,8 +84,8 @@ func TestListPodsNormalizesNestedGPUCountInBothWireShapes(t *testing.T) {
 		name string
 		body string
 	}{
-		{name: "documented wrapper", body: `{"pods":[{"id":"pod-1","gpu":{"count":2}}]}`},
-		{name: "bare array compatibility", body: `[{"id":"pod-1","gpu":{"count":2}}]`},
+		{name: "legacy wrapper compatibility", body: `{"pods":[{"id":"pod-1","gpu":{"count":2}}]}`},
+		{name: "documented bare array", body: `[{"id":"pod-1","gpu":{"count":2}}]`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

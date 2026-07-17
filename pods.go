@@ -107,8 +107,8 @@ func (c *Client) ListPods(ctx context.Context, opts *ListOptions) ([]*Pod, error
 	endpoint := c.buildListURL("/pods", opts)
 
 	// RunPod has returned multiple shapes for this endpoint over time:
-	// - {"pods":[...]}
-	// - [...]
+	// - [...] (current documented shape)
+	// - {"pods":[...]} (legacy compatibility shape)
 	//
 	// Be permissive so higher-level schedulers can reliably enforce max_workers / pod counts.
 	var raw json.RawMessage
@@ -119,7 +119,7 @@ func (c *Client) ListPods(ctx context.Context, opts *ListOptions) ([]*Pod, error
 		return nil, nil
 	}
 
-	// Prefer object wrapper (documented shape).
+	// Retain the legacy object wrapper before decoding the current bare array.
 	var wrapped struct {
 		Pods []*Pod `json:"pods"`
 	}
