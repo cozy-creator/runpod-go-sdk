@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"path"
 	"strings"
 )
 
@@ -281,6 +282,25 @@ func (c *Client) validateCreatePodRequest(req *CreatePodRequest) error {
 		}
 		if !isValid {
 			return NewValidationErrorWithValue("cloudType", "must be either 'SECURE' or 'COMMUNITY'", req.CloudType)
+		}
+	}
+
+	// Network volumes are a create-time, datacenter-local Secure Cloud
+	// attachment. Keep the three provider constraints inseparable so callers
+	// cannot accidentally ask RunPod to attach a volume while still allowing
+	// placement in another datacenter or in Community Cloud.
+	if strings.TrimSpace(req.NetworkVolumeID) != "" {
+		if strings.EqualFold(strings.TrimSpace(req.CloudType), "COMMUNITY") {
+			return NewValidationError("cloudType", "must be SECURE when networkVolumeId is set")
+		}
+		if len(req.DataCenterIDs) != 1 || strings.TrimSpace(req.DataCenterIDs[0]) == "" {
+			return NewValidationError("dataCenterIds", "must contain exactly the network volume datacenter")
+		}
+		if req.VolumeInGB != 0 {
+			return NewValidationError("volumeInGb", "must be omitted when networkVolumeId is set")
+		}
+		if mount := strings.TrimSpace(req.VolumeMountPath); mount != "" && !path.IsAbs(mount) {
+			return NewValidationError("volumeMountPath", "must be an absolute POSIX container path")
 		}
 	}
 

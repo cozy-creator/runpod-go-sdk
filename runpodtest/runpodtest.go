@@ -51,6 +51,8 @@ type Server struct {
 	stockOut  map[string]bool     // GPU type ID -> out of stock
 	gpuTypes  []runpod.GPUType
 	lifecycle map[string]*runpod.PodLifecycleObservation
+	accountID string
+	authz     []string
 	faults    []fault // queued one-shot injected responses
 }
 
@@ -72,6 +74,7 @@ func New() *Server {
 		jobs:      map[string]*fakeJob{},
 		stockOut:  map[string]bool{},
 		lifecycle: map[string]*runpod.PodLifecycleObservation{},
+		accountID: "runpodtest-account",
 	}
 	// Default GPU catalog for gpuTypes queries; override with SetGPUTypes.
 	for _, spec := range runpod.GPUCatalog() {
@@ -100,12 +103,19 @@ func (s *Server) Close() { s.httpServer.Close() }
 
 // Client returns an SDK client pointed at this fake server.
 func (s *Server) Client(opts ...runpod.ClientOption) (*runpod.Client, error) {
+	return s.ClientWithAPIKey("runpodtest-key", opts...)
+}
+
+// ClientWithAPIKey returns an SDK client authenticated with apiKey. The fake
+// account identity is independent of the credential so consumers can exercise
+// API-key rotation without changing provider resource ownership.
+func (s *Server) ClientWithAPIKey(apiKey string, opts ...runpod.ClientOption) (*runpod.Client, error) {
 	base := []runpod.ClientOption{
 		runpod.WithBaseURL(s.httpServer.URL),
 		runpod.WithServerlessBaseURL(s.httpServer.URL),
 		runpod.WithGraphQLBaseURL(s.httpServer.URL + "/graphql"),
 	}
-	return runpod.NewClient("runpodtest-key", append(base, opts...)...)
+	return runpod.NewClient(apiKey, append(base, opts...)...)
 }
 
 // MustClient is Client but panics on error (construction only fails on
@@ -144,11 +154,50 @@ func (s *Server) SetGPUTypes(types []runpod.GPUType) {
 	s.gpuTypes = append([]runpod.GPUType(nil), types...)
 }
 
+// SetAccountID replaces the stable ID returned by the authenticated
+// `myself` GraphQL query.
+func (s *Server) SetAccountID(accountID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.accountID = accountID
+}
+
+// AuthorizationHeaders returns the credentials observed by the fake in
+// request order. It is intended for tests that need to prove credential
+// rotation reached the provider boundary.
+func (s *Server) AuthorizationHeaders() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.authz...)
+}
+
 // AddPod seeds a pod into the fake state.
 func (s *Server) AddPod(pod *runpod.Pod) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pods[pod.ID] = pod
+}
+
+// AddNetworkVolume seeds a provider-owned network volume. The fake enforces
+// the same create-time Secure Cloud and datacenter attachment constraints as
+// RunPod, so consumer tests exercise their real placement intent.
+func (s *Server) AddNetworkVolume(volume *runpod.NetworkVolume) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	copy := *volume
+	s.volumes[copy.ID] = &copy
+}
+
+// NetworkVolume returns a copy of a seeded/created network volume, or nil.
+func (s *Server) NetworkVolume(id string) *runpod.NetworkVolume {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	volume := s.volumes[id]
+	if volume == nil {
+		return nil
+	}
+	copy := *volume
+	return &copy
 }
 
 // SetPodLifecycleObservation sets the GraphQL lifecycle view for a pod.
@@ -233,7 +282,11 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 
-	if r.Header.Get("Authorization") == "" {
+	authorization := r.Header.Get("Authorization")
+	s.mu.Lock()
+	s.authz = append(s.authz, authorization)
+	s.mu.Unlock()
+	if authorization == "" {
 		writeErr(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
@@ -276,6 +329,28 @@ func (s *Server) handlePods(w http.ResponseWriter, r *http.Request, path string)
 				return
 			}
 		}
+		var attached *runpod.NetworkVolume
+		if volumeID := strings.TrimSpace(req.NetworkVolumeID); volumeID != "" {
+			volume := s.volumes[volumeID]
+			if volume == nil {
+				s.mu.Unlock()
+				writeErr(w, http.StatusBadRequest, "network volume not found")
+				return
+			}
+			cloudType := strings.TrimSpace(req.CloudType)
+			if cloudType != "" && !strings.EqualFold(cloudType, "SECURE") {
+				s.mu.Unlock()
+				writeErr(w, http.StatusBadRequest, "network volumes require Secure Cloud")
+				return
+			}
+			if len(req.DataCenterIDs) != 1 || strings.TrimSpace(req.DataCenterIDs[0]) != strings.TrimSpace(volume.DataCenterID) {
+				s.mu.Unlock()
+				writeErr(w, http.StatusBadRequest, "network volume datacenter mismatch")
+				return
+			}
+			copy := *volume
+			attached = &copy
+		}
 		pod := &runpod.Pod{
 			ID:                s.newID("pod"),
 			Name:              req.Name,
@@ -285,9 +360,15 @@ func (s *Server) handlePods(w http.ResponseWriter, r *http.Request, path string)
 			ContainerDiskInGB: req.ContainerDiskInGB,
 			Interruptible:     req.Interruptible,
 			Env:               req.Env,
+			VolumeMountPath:   req.VolumeMountPath,
+			NetworkVolumeID:   req.NetworkVolumeID,
+			NetworkVolume:     attached,
 		}
 		if len(req.GPUTypeIDs) > 0 {
 			pod.Machine = &runpod.Machine{ID: s.newID("machine"), GPUTypeID: req.GPUTypeIDs[0]}
+			if len(req.DataCenterIDs) > 0 {
+				pod.Machine.DataCenterID = strings.TrimSpace(req.DataCenterIDs[0])
+			}
 		}
 		s.pods[pod.ID] = pod
 		s.mu.Unlock()
@@ -404,6 +485,13 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request, path stri
 			writeJSON(w, http.StatusOK, vol)
 		case http.MethodDelete:
 			s.mu.Lock()
+			for _, pod := range s.pods {
+				if strings.TrimSpace(pod.NetworkVolumeID) == volID {
+					s.mu.Unlock()
+					writeErr(w, http.StatusConflict, "network volume is attached to a pod")
+					return
+				}
+			}
 			delete(s.volumes, volID)
 			s.mu.Unlock()
 			w.WriteHeader(http.StatusNoContent)
@@ -569,6 +657,17 @@ func (s *Server) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid graphql request")
+		return
+	}
+	if strings.Contains(req.Query, "myself") {
+		s.mu.Lock()
+		accountID := s.accountID
+		s.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"data": map[string]interface{}{
+				"myself": map[string]string{"id": accountID},
+			},
+		})
 		return
 	}
 	if strings.Contains(req.Query, "pod(input:") {
