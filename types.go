@@ -437,9 +437,9 @@ type UpdateSecretRequest struct {
 	Value string `json:"value"`
 }
 
-// normalize reconciles wire-format drift on a decoded Pod. Prefer direct
-// top-level fields when present, then fill them from the documented nested
-// response shape.
+// normalize reconciles wire-format drift on a decoded Pod. Preserve a valid
+// legacy top-level count, fill it from the documented nested shape when
+// absent, and fail closed on conflicting positive counts.
 func (p *Pod) normalize() {
 	if p == nil {
 		return
