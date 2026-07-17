@@ -104,6 +104,7 @@ type Pod struct {
 	ImageName         string            `json:"imageName"`
 	ImageAlt          string            `json:"image,omitempty"`
 	GPUCount          int               `json:"gpuCount"`
+	GPU               *PodGPU           `json:"gpu,omitempty"`
 	VCPUCount         int               `json:"vcpuCount"`
 	MemoryInGB        int               `json:"memoryInGb"`
 	ContainerDiskInGB int               `json:"containerDiskInGb"`
@@ -131,6 +132,15 @@ type Pod struct {
 	// as the sentinel "unknown" — callers should treat that as "no GPU"
 	// rather than as a real GPU type.
 	CPUFlavorID string `json:"cpuFlavorId,omitempty"`
+}
+
+// PodGPU is the allocated GPU shape embedded in current RunPod REST pod
+// responses. The public API documents the pod allocation count at gpu.count;
+// older responses also exposed the same value as top-level gpuCount.
+type PodGPU struct {
+	ID          string `json:"id,omitempty"`
+	Count       int    `json:"count,omitempty"`
+	DisplayName string `json:"displayName,omitempty"`
 }
 
 func (p *Pod) Status() string {
@@ -427,15 +437,18 @@ type UpdateSecretRequest struct {
 	Value string `json:"value"`
 }
 
-// normalize reconciles wire-format drift on a decoded Pod: the live REST API
-// sends `imageName` while the published schema says `image` — keep whichever
-// arrived (th#648).
+// normalize reconciles wire-format drift on a decoded Pod. Prefer direct
+// top-level fields when present, then fill them from the documented nested
+// response shape.
 func (p *Pod) normalize() {
 	if p == nil {
 		return
 	}
 	if strings.TrimSpace(p.ImageName) == "" {
 		p.ImageName = strings.TrimSpace(p.ImageAlt)
+	}
+	if p.GPUCount <= 0 && p.GPU != nil && p.GPU.Count > 0 {
+		p.GPUCount = p.GPU.Count
 	}
 }
 
