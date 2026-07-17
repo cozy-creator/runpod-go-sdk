@@ -37,7 +37,7 @@ func TestCreatePodNormalizesOfficialNestedGPUCount(t *testing.T) {
 	}
 }
 
-func TestGetPodGPUCountNormalizationPrecedence(t *testing.T) {
+func TestGetPodGPUCountNormalization(t *testing.T) {
 	tests := []struct {
 		name string
 		body string
@@ -48,11 +48,8 @@ func TestGetPodGPUCountNormalizationPrecedence(t *testing.T) {
 			body: `{"id":"pod-1","gpu":{"count":4}}`,
 			want: 4,
 		},
-		{
-			name: "top-level compatibility wins",
-			body: `{"id":"pod-1","gpuCount":2,"gpu":{"count":4}}`,
-			want: 2,
-		},
+		{name: "matching top-level compatibility", body: `{"id":"pod-1","gpuCount":2,"gpu":{"count":2}}`, want: 2},
+		{name: "conflicting positive counts fail closed", body: `{"id":"pod-1","gpuCount":2,"gpu":{"count":4}}`, want: 0},
 		{
 			name: "missing count remains unknown",
 			body: `{"id":"pod-1","gpu":{"id":"NVIDIA A40"}}`,
@@ -77,6 +74,37 @@ func TestGetPodGPUCountNormalizationPrecedence(t *testing.T) {
 			}
 			if pod.GPUCount != test.want {
 				t.Fatalf("GPUCount = %d, want %d: %+v", pod.GPUCount, test.want, pod)
+			}
+		})
+	}
+}
+
+func TestListPodsNormalizesNestedGPUCountInBothWireShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "documented wrapper", body: `{"pods":[{"id":"pod-1","gpu":{"count":2}}]}`},
+		{name: "bare array compatibility", body: `[{"id":"pod-1","gpu":{"count":2}}]`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/pods" {
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, test.body)
+			}))
+			defer server.Close()
+
+			client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL))
+			pods, err := client.ListPods(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(pods) != 1 || pods[0].GPUCount != 2 {
+				t.Fatalf("normalized pods = %+v, want one pod with count 2", pods)
 			}
 		})
 	}

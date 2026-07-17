@@ -447,8 +447,16 @@ func (p *Pod) normalize() {
 	if strings.TrimSpace(p.ImageName) == "" {
 		p.ImageName = strings.TrimSpace(p.ImageAlt)
 	}
-	if p.GPUCount <= 0 && p.GPU != nil && p.GPU.Count > 0 {
-		p.GPUCount = p.GPU.Count
+	if p.GPU != nil && p.GPU.Count > 0 {
+		switch {
+		case p.GPUCount <= 0:
+			p.GPUCount = p.GPU.Count
+		case p.GPUCount != p.GPU.Count:
+			// Conflicting positive allocation counts are not safely
+			// reconcilable. Preserve the nested wire evidence but make the
+			// normalized count unknown so exact-placement callers fail closed.
+			p.GPUCount = 0
+		}
 	}
 }
 
