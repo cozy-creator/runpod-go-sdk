@@ -238,6 +238,16 @@ func TestAccountIDStableAcrossAPIKeyRotation(t *testing.T) {
 	if beforeID != "account-123" || afterID != beforeID {
 		t.Fatalf("account IDs before/after rotation = %q/%q", beforeID, afterID)
 	}
+	gotAuth := srv.AuthorizationHeaders()
+	wantAuth := []string{"Bearer key-before-rotation", "Bearer key-after-rotation"}
+	if len(gotAuth) != len(wantAuth) {
+		t.Fatalf("authorization headers = %q, want %q", gotAuth, wantAuth)
+	}
+	for i := range wantAuth {
+		if gotAuth[i] != wantAuth[i] {
+			t.Fatalf("authorization header %d = %q, want %q", i, gotAuth[i], wantAuth[i])
+		}
+	}
 }
 
 func TestAccountIDRejectsMissingProviderIdentity(t *testing.T) {
@@ -266,15 +276,51 @@ func TestNetworkVolumePodAttachmentRejectsUnsafePlacement(t *testing.T) {
 		GPUCount: 1, ContainerDiskInGB: 100, CloudType: "SECURE",
 		DataCenterIDs: []string{"US-KS-2"}, NetworkVolumeID: volume.ID,
 	}
-	community := base
-	community.CloudType = "COMMUNITY"
-	if _, err := client.CreatePod(ctx, &community); err == nil {
-		t.Fatal("Community Cloud attachment must fail")
+	tests := []struct {
+		name   string
+		mutate func(*runpod.CreatePodRequest)
+	}{
+		{"community cloud", func(req *runpod.CreatePodRequest) { req.CloudType = "COMMUNITY" }},
+		{"missing datacenter", func(req *runpod.CreatePodRequest) { req.DataCenterIDs = nil }},
+		{"multiple datacenters", func(req *runpod.CreatePodRequest) { req.DataCenterIDs = []string{"US-KS-2", "EU-RO-1"} }},
+		{"wrong datacenter", func(req *runpod.CreatePodRequest) { req.DataCenterIDs = []string{"EU-RO-1"} }},
+		{"ordinary volume disk", func(req *runpod.CreatePodRequest) { req.VolumeInGB = 100 }},
+		{"relative mount path", func(req *runpod.CreatePodRequest) { req.VolumeMountPath = "workspace" }},
 	}
-	wrongDatacenter := base
-	wrongDatacenter.DataCenterIDs = []string{"EU-RO-1"}
-	if _, err := client.CreatePod(ctx, &wrongDatacenter); err == nil {
-		t.Fatal("cross-datacenter attachment must fail")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := base
+			test.mutate(&req)
+			if _, err := client.CreatePod(ctx, &req); err == nil {
+				t.Fatal("unsafe network-volume placement must fail")
+			}
+		})
+	}
+}
+
+func TestNetworkVolumePodAttachmentDefaultsToSecureCloud(t *testing.T) {
+	srv := runpodtest.New()
+	defer srv.Close()
+	client := srv.MustClient()
+	ctx := context.Background()
+
+	volume, err := client.CreateNetworkVolume(ctx, &runpod.CreateNetworkVolumeRequest{
+		Name: "endpoint-cache", Size: 100, DataCenterID: "US-KS-2",
+	})
+	if err != nil {
+		t.Fatalf("CreateNetworkVolume: %v", err)
+	}
+	pod, err := client.CreatePod(ctx, &runpod.CreatePodRequest{
+		Name: "worker", ImageName: "image", GPUTypeIDs: []string{"NVIDIA GeForce RTX 4090"},
+		GPUCount: 1, ContainerDiskInGB: 100,
+		DataCenterIDs: []string{"US-KS-2"}, NetworkVolumeID: volume.ID,
+		VolumeMountPath: "/workspace",
+	})
+	if err != nil {
+		t.Fatalf("CreatePod with default Secure Cloud: %v", err)
+	}
+	if pod.NetworkVolumeID != volume.ID || pod.VolumeMountPath != "/workspace" {
+		t.Fatalf("default-Secure attachment = %+v", pod)
 	}
 }
 

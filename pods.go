@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"path/filepath"
+	"path"
 	"strings"
 )
 
@@ -299,8 +299,8 @@ func (c *Client) validateCreatePodRequest(req *CreatePodRequest) error {
 		if req.VolumeInGB != 0 {
 			return NewValidationError("volumeInGb", "must be omitted when networkVolumeId is set")
 		}
-		if mount := strings.TrimSpace(req.VolumeMountPath); mount != "" && !filepath.IsAbs(mount) {
-			return NewValidationError("volumeMountPath", "must be an absolute path")
+		if mount := strings.TrimSpace(req.VolumeMountPath); mount != "" && !path.IsAbs(mount) {
+			return NewValidationError("volumeMountPath", "must be an absolute POSIX container path")
 		}
 	}
 

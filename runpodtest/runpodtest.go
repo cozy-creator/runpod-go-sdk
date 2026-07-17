@@ -52,6 +52,7 @@ type Server struct {
 	gpuTypes  []runpod.GPUType
 	lifecycle map[string]*runpod.PodLifecycleObservation
 	accountID string
+	authz     []string
 	faults    []fault // queued one-shot injected responses
 }
 
@@ -159,6 +160,15 @@ func (s *Server) SetAccountID(accountID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.accountID = accountID
+}
+
+// AuthorizationHeaders returns the credentials observed by the fake in
+// request order. It is intended for tests that need to prove credential
+// rotation reached the provider boundary.
+func (s *Server) AuthorizationHeaders() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.authz...)
 }
 
 // AddPod seeds a pod into the fake state.
@@ -272,7 +282,11 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 
-	if r.Header.Get("Authorization") == "" {
+	authorization := r.Header.Get("Authorization")
+	s.mu.Lock()
+	s.authz = append(s.authz, authorization)
+	s.mu.Unlock()
+	if authorization == "" {
 		writeErr(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
@@ -323,7 +337,8 @@ func (s *Server) handlePods(w http.ResponseWriter, r *http.Request, path string)
 				writeErr(w, http.StatusBadRequest, "network volume not found")
 				return
 			}
-			if !strings.EqualFold(strings.TrimSpace(req.CloudType), "SECURE") {
+			cloudType := strings.TrimSpace(req.CloudType)
+			if cloudType != "" && !strings.EqualFold(cloudType, "SECURE") {
 				s.mu.Unlock()
 				writeErr(w, http.StatusBadRequest, "network volumes require Secure Cloud")
 				return
