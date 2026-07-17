@@ -195,11 +195,58 @@ func TestNetworkVolumePodAttachment(t *testing.T) {
 	if pod.NetworkVolume == nil || pod.NetworkVolume.ID != volume.ID || pod.NetworkVolumeID != volume.ID {
 		t.Fatalf("attachment identity missing from pod response: %+v", pod)
 	}
+	if pod.VolumeMountPath != "/runpod-volume" {
+		t.Fatalf("mount path = %q, want /runpod-volume", pod.VolumeMountPath)
+	}
 	if pod.Machine == nil || pod.Machine.DataCenterID != "US-KS-2" {
 		t.Fatalf("pod landed outside volume datacenter: %+v", pod.Machine)
 	}
+	listed, err := client.ListPods(ctx, nil)
+	if err != nil || len(listed) != 1 {
+		t.Fatalf("ListPods: %v %+v", err, listed)
+	}
+	if listed[0].VolumeMountPath != "/runpod-volume" {
+		t.Fatalf("listed mount path = %q, want /runpod-volume", listed[0].VolumeMountPath)
+	}
 	if err := client.DeleteNetworkVolume(ctx, volume.ID); err == nil {
 		t.Fatal("attached volume deletion must fail")
+	}
+}
+
+func TestAccountIDStableAcrossAPIKeyRotation(t *testing.T) {
+	srv := runpodtest.New()
+	defer srv.Close()
+	srv.SetAccountID("account-123")
+
+	before, err := srv.ClientWithAPIKey("key-before-rotation")
+	if err != nil {
+		t.Fatalf("client before rotation: %v", err)
+	}
+	after, err := srv.ClientWithAPIKey("key-after-rotation")
+	if err != nil {
+		t.Fatalf("client after rotation: %v", err)
+	}
+
+	beforeID, err := before.GetAccountID(context.Background())
+	if err != nil {
+		t.Fatalf("GetAccountID before rotation: %v", err)
+	}
+	afterID, err := after.GetAccountID(context.Background())
+	if err != nil {
+		t.Fatalf("GetAccountID after rotation: %v", err)
+	}
+	if beforeID != "account-123" || afterID != beforeID {
+		t.Fatalf("account IDs before/after rotation = %q/%q", beforeID, afterID)
+	}
+}
+
+func TestAccountIDRejectsMissingProviderIdentity(t *testing.T) {
+	srv := runpodtest.New()
+	defer srv.Close()
+	srv.SetAccountID("  ")
+
+	if _, err := srv.MustClient().GetAccountID(context.Background()); err == nil {
+		t.Fatal("GetAccountID must reject a response without myself.id")
 	}
 }
 

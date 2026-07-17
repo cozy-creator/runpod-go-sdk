@@ -51,6 +51,7 @@ type Server struct {
 	stockOut  map[string]bool     // GPU type ID -> out of stock
 	gpuTypes  []runpod.GPUType
 	lifecycle map[string]*runpod.PodLifecycleObservation
+	accountID string
 	faults    []fault // queued one-shot injected responses
 }
 
@@ -72,6 +73,7 @@ func New() *Server {
 		jobs:      map[string]*fakeJob{},
 		stockOut:  map[string]bool{},
 		lifecycle: map[string]*runpod.PodLifecycleObservation{},
+		accountID: "runpodtest-account",
 	}
 	// Default GPU catalog for gpuTypes queries; override with SetGPUTypes.
 	for _, spec := range runpod.GPUCatalog() {
@@ -100,12 +102,19 @@ func (s *Server) Close() { s.httpServer.Close() }
 
 // Client returns an SDK client pointed at this fake server.
 func (s *Server) Client(opts ...runpod.ClientOption) (*runpod.Client, error) {
+	return s.ClientWithAPIKey("runpodtest-key", opts...)
+}
+
+// ClientWithAPIKey returns an SDK client authenticated with apiKey. The fake
+// account identity is independent of the credential so consumers can exercise
+// API-key rotation without changing provider resource ownership.
+func (s *Server) ClientWithAPIKey(apiKey string, opts ...runpod.ClientOption) (*runpod.Client, error) {
 	base := []runpod.ClientOption{
 		runpod.WithBaseURL(s.httpServer.URL),
 		runpod.WithServerlessBaseURL(s.httpServer.URL),
 		runpod.WithGraphQLBaseURL(s.httpServer.URL + "/graphql"),
 	}
-	return runpod.NewClient("runpodtest-key", append(base, opts...)...)
+	return runpod.NewClient(apiKey, append(base, opts...)...)
 }
 
 // MustClient is Client but panics on error (construction only fails on
@@ -142,6 +151,14 @@ func (s *Server) SetGPUTypes(types []runpod.GPUType) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.gpuTypes = append([]runpod.GPUType(nil), types...)
+}
+
+// SetAccountID replaces the stable ID returned by the authenticated
+// `myself` GraphQL query.
+func (s *Server) SetAccountID(accountID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.accountID = accountID
 }
 
 // AddPod seeds a pod into the fake state.
@@ -625,6 +642,17 @@ func (s *Server) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid graphql request")
+		return
+	}
+	if strings.Contains(req.Query, "myself") {
+		s.mu.Lock()
+		accountID := s.accountID
+		s.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"data": map[string]interface{}{
+				"myself": map[string]string{"id": accountID},
+			},
+		})
 		return
 	}
 	if strings.Contains(req.Query, "pod(input:") {
