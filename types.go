@@ -150,16 +150,18 @@ func (p *Pod) Status() string {
 // PodRuntime is the pod's live runtime block (present once the container
 // is up).
 type PodRuntime struct {
-	UptimeSeconds     int                    `json:"uptimeSeconds"`
-	LastStartedAt     string                 `json:"lastStartedAt"`
-	LastStatusChange  string                 `json:"lastStatusChange,omitempty"`
-	LastStatusCharge  string                 `json:"lastStatusCharge,omitempty"`
-	PublicIP          string                 `json:"publicIp,omitempty"`
-	Ports             map[string]interface{} `json:"ports,omitempty"`
-	Status            string                 `json:"status,omitempty"`
-	Reason            string                 `json:"reason,omitempty"`
-	Error             string                 `json:"error,omitempty"`
-	ContainerExitCode int                    `json:"containerExitCode,omitempty"`
+	UptimeSeconds    int                    `json:"uptimeSeconds"`
+	LastStartedAt    string                 `json:"lastStartedAt"`
+	LastStatusChange string                 `json:"lastStatusChange,omitempty"`
+	LastStatusCharge string                 `json:"lastStatusCharge,omitempty"`
+	PublicIP         string                 `json:"publicIp,omitempty"`
+	Ports            map[string]interface{} `json:"ports,omitempty"`
+	Status           string                 `json:"status,omitempty"`
+	Reason           string                 `json:"reason,omitempty"`
+	Error            string                 `json:"error,omitempty"`
+	// ContainerExitCode is the container's exit code when the record carries
+	// one; nil distinguishes "not exposed" from a genuine 0 exit (rp#16).
+	ContainerExitCode *int `json:"containerExitCode,omitempty"`
 }
 
 // Machine describes the host a pod landed on.

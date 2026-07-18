@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// Pod terminal-error surface (tensorhub th#648).
+// Pod terminal-error surface (tensorhub th#648, reshaped by rp#16 / th#874).
 //
 // RunPod's pod create returns success synchronously; machine-side failures
 // (image pull rejection, host faults, spot reclaims) surface MINUTES later as
@@ -15,60 +15,79 @@ import (
 //
 //   - REST GET /pods/{id}: desiredStatus (RUNNING|EXITED|TERMINATED) plus
 //     lastStatusChange — free text that for failures reads just
-//     "Exited by Runpod: <ts>" with NO error class.
+//     "Exited by Runpod: <ts>" with NO error class. With includeMachine the
+//     record carries the host machine id / GPU type / datacenter, and the
+//     runtime block (when still present) the container exit code.
 //   - GraphQL pod{...}: desiredStatus plus current lastStartedAt and
 //     latestTelemetry{state,time}; telemetry can expose a current-generation
-//     container exit while REST desiredStatus is still RUNNING, but carries
-//     no provider error class.
-//   - The console/email texts ("Pod initialization error ...
-//     IMAGE_AUTH_ERROR:unauthorized", "IMAGE_NOT_FOUND") come from RunPod's
-//     session-authed system-log service (hapi.runpod.net) and CSR-scoped
-//     notification queries — NOT reachable with an API key.
+//     container exit while REST desiredStatus is still RUNNING.
+//   - No pod-logs endpoint exists on the public API surface
+//     (GetProviderFeatureSupport documents this), so a last-log tail cannot
+//     be fetched.
 //
-// So classification is derived: message markers when present (defensive —
-// RunPod may add them to lastStatusChange someday), the interruptible flag
-// for spot reclaims, and an optional caller-supplied registry probe that
-// checks the image manifest with the same pull credentials pods receive:
-// 401/403 → image_auth, 404 → image_missing, 200 → the image is fine so the
-// failure was host-side.
+// The SDK reports typed FACTS (exit code, machine, SKU, container-observed,
+// probe outcome) and only claims a class where the evidence is itself typed:
+// the registry probe (image_auth / image_missing) and the interruptible flag
+// (interrupted). Everything else is `unknown` — semantic death classification
+// (boot crash vs transient vs SKU-bound) is the consumer's job, aggregated
+// across pods (tensorhub th#874 layer 2). The former prose-marker matching
+// (ClassifyPodErrorMessage) and its probe-OK → host_fault default are gone.
 
-// PodErrorClass is the job-relevant classification of a terminal pod error.
+// PodErrorClass is the typed-evidence classification of a terminal pod error.
 type PodErrorClass string
 
 const (
-	// PodErrorImageAuth — image pull rejected as unauthorized (RunPod's
-	// IMAGE_AUTH_ERROR family). Docker Hub also answers this for refs under
-	// a private namespace the credentials cannot see.
+	// PodErrorImageAuth — image pull rejected as unauthorized (registry
+	// answered 401/403 to the same pull credentials pods receive). Docker Hub
+	// also answers this for refs under a private namespace the credentials
+	// cannot see.
 	PodErrorImageAuth PodErrorClass = "image_auth"
-	// PodErrorImageMissing — image manifest does not exist (RunPod's
-	// IMAGE_NOT_FOUND family; registry 404).
+	// PodErrorImageMissing — image manifest does not exist (registry 404 /
+	// unparseable ref).
 	PodErrorImageMissing PodErrorClass = "image_missing"
-	// PodErrorOOM — out-of-memory kill.
-	PodErrorOOM PodErrorClass = "oom"
-	// PodErrorHostFault — machine-side failure while the image itself is
-	// pullable; retry on a different host.
-	PodErrorHostFault PodErrorClass = "host_fault"
 	// PodErrorInterrupted — spot/interruptible pod reclaimed.
 	PodErrorInterrupted PodErrorClass = "interrupted"
-	// PodErrorUnknown — terminal, cause not classifiable from the available
-	// surface.
+	// PodErrorUnknown — terminal, cause not classifiable from typed evidence
+	// on the API surface. Consumers classify from the observation fields.
 	PodErrorUnknown PodErrorClass = "unknown"
 )
 
-// PodTerminalError is the classified terminal verdict for a pod.
+// PodTerminalError is the terminal verdict for a pod: a typed class where the
+// evidence allows one, plus raw observation facts for consumer-side
+// classification.
 type PodTerminalError struct {
 	PodID string
 	Class PodErrorClass
 	// Reason is the mechanical shape: pod_exited | pod_missing.
 	Reason string
 	// Message carries the provider's own text (lastStatusChange) plus any
-	// classification detail.
+	// probe/telemetry detail.
 	Message string
 	// ImageRef is the pod's image, when the pod record still exists.
 	ImageRef string
 	// Interruptible marks spot pods.
 	Interruptible bool
-	ObservedAt    time.Time
+
+	// ExitCode is the container exit code when the pod record still carries
+	// it (runtime.containerExitCode). Nil = not exposed.
+	ExitCode *int
+	// MachineID / GPUTypeID / DataCenterID identify the host placement, when
+	// the record exposes them (GPUTypeID empty for CPU pods).
+	MachineID    string
+	GPUTypeID    string
+	DataCenterID string
+	// UptimeSeconds is the runtime block's uptime at observation, when present.
+	UptimeSeconds int
+	// ContainerObserved reports that a container generation demonstrably ran
+	// (exit code present, positive uptime, or fresh terminal telemetry for
+	// the current start generation). False = the pod died before any
+	// container start the API surface can prove (placement / image pull).
+	ContainerObserved bool
+	// ProbeOutcome is the raw registry-probe outcome (RegistryProbe*
+	// constants; empty = no probe ran).
+	ProbeOutcome string
+
+	ObservedAt time.Time
 }
 
 // Registry-probe outcomes for PodTerminalErrorOptions.RegistryProbe.
@@ -89,37 +108,20 @@ type RegistryProbeFunc func(ctx context.Context, imageRef string) (outcome strin
 // PodTerminalErrorOptions tunes GetPodTerminalError.
 type PodTerminalErrorOptions struct {
 	// RegistryProbe, when set, refines an otherwise-unclassifiable exit into
-	// image_auth / image_missing / host_fault.
+	// image_auth / image_missing and stamps ProbeOutcome either way.
 	RegistryProbe RegistryProbeFunc
 }
 
-// ClassifyPodErrorMessage maps RunPod's error-text vocabulary (console,
-// notification emails, and any future lastStatusChange enrichment) to a
-// class. Returns PodErrorUnknown when the text carries no marker — which is
-// the norm for the API surface's bare "Exited by Runpod: <ts>".
-func ClassifyPodErrorMessage(msg string) PodErrorClass {
-	m := strings.ToLower(msg)
-	switch {
-	case strings.Contains(m, "image_auth_error") || strings.Contains(m, "pull access denied") || strings.Contains(m, "unauthorized"):
-		return PodErrorImageAuth
-	case strings.Contains(m, "image_not_found") || strings.Contains(m, "manifest unknown") || strings.Contains(m, "not found: manifest"):
-		return PodErrorImageMissing
-	case strings.Contains(m, "out of memory") || strings.Contains(m, "oom kill") || strings.Contains(m, "oom_kill") || strings.Contains(m, "oomkilled"):
-		return PodErrorOOM
-	default:
-		return PodErrorUnknown
-	}
-}
-
 // GetPodTerminalError reports whether the pod is terminally dead without
-// having served, and classifies why. Returns (nil, false, nil) while the pod
-// is alive or still initializing; (verdict, true, nil) for a terminal state;
-// error for provider API failures other than a REST pod-missing 404.
+// having served, with typed observation facts. Returns (nil, false, nil)
+// while the pod is alive or still initializing; (verdict, true, nil) for a
+// terminal state; error for provider API failures other than a REST
+// pod-missing 404.
 func (c *Client) GetPodTerminalError(ctx context.Context, podID string, opts *PodTerminalErrorOptions) (*PodTerminalError, bool, error) {
 	if err := c.validateRequired("podID", podID); err != nil {
 		return nil, false, err
 	}
-	pod, err := c.GetPod(ctx, podID)
+	pod, err := c.GetPodWithOptions(ctx, podID, &GetPodOptions{IncludeMachine: true})
 	if err != nil {
 		var apiErr *APIError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == 404 {
@@ -134,6 +136,7 @@ func (c *Client) GetPodTerminalError(ctx context.Context, podID string, opts *Po
 		return nil, false, err
 	}
 	providerDetail := ""
+	freshTerminalTelemetry := false
 	if !isTerminalPodStatus(pod.DesiredStatus) {
 		observation, err := c.GetPodLifecycleObservation(ctx, podID)
 		if err != nil {
@@ -143,6 +146,7 @@ func (c *Client) GetPodTerminalError(ctx context.Context, podID string, opts *Po
 		case isTerminalPodStatus(observation.DesiredStatus):
 			providerDetail = "GraphQL desired status " + strings.TrimSpace(observation.DesiredStatus)
 		case hasFreshTerminalTelemetry(observation):
+			freshTerminalTelemetry = true
 			providerDetail = "provider telemetry state exited at " + observation.LatestTelemetry.Time.Time.UTC().Format(time.RFC3339Nano) +
 				" for start generation " + observation.LastStartedAt.Time.UTC().Format(time.RFC3339Nano)
 		default:
@@ -156,27 +160,43 @@ func (c *Client) GetPodTerminalError(ctx context.Context, podID string, opts *Po
 
 	verdict := &PodTerminalError{
 		PodID:         podID,
+		Class:         PodErrorUnknown,
 		Reason:        "pod_exited",
 		Message:       message,
 		ImageRef:      strings.TrimSpace(pod.ImageName),
 		Interruptible: pod.Interruptible,
+		MachineID:     strings.TrimSpace(pod.MachineID),
 		ObservedAt:    time.Now().UTC(),
 	}
-
-	// 1. Message markers (rare on the API surface, definitive when present).
-	if class := ClassifyPodErrorMessage(verdict.Message); class != PodErrorUnknown {
-		verdict.Class = class
-		return verdict, true, nil
+	if pod.Machine != nil {
+		if verdict.MachineID == "" {
+			verdict.MachineID = strings.TrimSpace(pod.Machine.ID)
+		}
+		verdict.DataCenterID = strings.TrimSpace(pod.Machine.DataCenterID)
+		// CPU pods report the sentinel "unknown" GPU type — normalize to none.
+		if gt := strings.TrimSpace(pod.Machine.GPUTypeID); !strings.EqualFold(gt, "unknown") {
+			verdict.GPUTypeID = gt
+		}
 	}
-	// 2. Spot reclaim.
+	if verdict.GPUTypeID == "" && pod.GPU != nil {
+		verdict.GPUTypeID = strings.TrimSpace(pod.GPU.ID)
+	}
+	if pod.Runtime != nil {
+		verdict.ExitCode = pod.Runtime.ContainerExitCode
+		verdict.UptimeSeconds = pod.Runtime.UptimeSeconds
+	}
+	verdict.ContainerObserved = verdict.ExitCode != nil || verdict.UptimeSeconds > 0 || freshTerminalTelemetry
+
+	// Spot reclaim: typed provider flag.
 	if pod.Interruptible {
 		verdict.Class = PodErrorInterrupted
 		verdict.Message = strings.TrimSpace(verdict.Message + "; interruptible pod reclaimed by provider")
 		return verdict, true, nil
 	}
-	// 3. Registry probe with the caller's pull credentials.
+	// Registry probe with the caller's pull credentials.
 	if opts != nil && opts.RegistryProbe != nil && verdict.ImageRef != "" {
 		outcome, detail := opts.RegistryProbe(ctx, verdict.ImageRef)
+		verdict.ProbeOutcome = outcome
 		if detail != "" {
 			verdict.Message = strings.TrimSpace(verdict.Message + "; registry probe: " + detail)
 		}
@@ -185,13 +205,7 @@ func (c *Client) GetPodTerminalError(ctx context.Context, podID string, opts *Po
 			verdict.Class = PodErrorImageAuth
 		case RegistryProbeNotFound, RegistryProbeInvalidRef:
 			verdict.Class = PodErrorImageMissing
-		case RegistryProbeOK:
-			verdict.Class = PodErrorHostFault
-		default:
-			verdict.Class = PodErrorUnknown
 		}
-		return verdict, true, nil
 	}
-	verdict.Class = PodErrorUnknown
 	return verdict, true, nil
 }
