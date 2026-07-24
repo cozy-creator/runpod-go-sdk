@@ -13,7 +13,9 @@ type podCreateOpenAPIDocument struct {
 			PodCreateInput struct {
 				Properties struct {
 					DataCenterIDs struct {
-						Enum []string `json:"enum"`
+						Items struct {
+							Enum []string `json:"enum"`
+						} `json:"items"`
 					} `json:"dataCenterIds"`
 				} `json:"properties"`
 			} `json:"PodCreateInput"`
@@ -34,9 +36,10 @@ func (c *Client) ListPodCreateDatacenterIDs(ctx context.Context) ([]string, erro
 		return nil, fmt.Errorf("failed to decode RunPod OpenAPI schema: %w", err)
 	}
 
-	ids := make([]string, 0, len(document.Components.Schemas.PodCreateInput.Properties.DataCenterIDs.Enum))
+	rawIDs := document.Components.Schemas.PodCreateInput.Properties.DataCenterIDs.Items.Enum
+	ids := make([]string, 0, len(rawIDs))
 	seen := make(map[string]struct{}, cap(ids))
-	for _, rawID := range document.Components.Schemas.PodCreateInput.Properties.DataCenterIDs.Enum {
+	for _, rawID := range rawIDs {
 		id := strings.TrimSpace(rawID)
 		if id == "" {
 			continue

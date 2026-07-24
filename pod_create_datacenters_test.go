@@ -18,17 +18,17 @@ func TestListPodCreateDatacenterIDs(t *testing.T) {
 	}{
 		{
 			name: "trimmed and deduplicated",
-			body: `{"components":{"schemas":{"PodCreateInput":{"properties":{"dataCenterIds":{"enum":["EU-RO-1"," US-GA-1 ","EU-RO-1",""]}}}}}}`,
+			body: `{"components":{"schemas":{"PodCreateInput":{"properties":{"dataCenterIds":{"items":{"enum":["EU-RO-1"," US-GA-1 ","EU-RO-1",""]}}}}}}}`,
 			want: []string{"EU-RO-1", "US-GA-1"},
 		},
 		{
 			name:    "missing enum fails closed",
-			body:    `{"components":{"schemas":{"PodCreateInput":{"properties":{"dataCenterIds":{}}}}}}`,
+			body:    `{"components":{"schemas":{"PodCreateInput":{"properties":{"dataCenterIds":{"enum":["EU-RO-1"]}}}}}}`,
 			wantErr: "dataCenterIds enum is missing or empty",
 		},
 		{
 			name:    "malformed enum fails closed",
-			body:    `{"components":{"schemas":{"PodCreateInput":{"properties":{"dataCenterIds":{"enum":"EU-RO-1"}}}}}}`,
+			body:    `{"components":{"schemas":{"PodCreateInput":{"properties":{"dataCenterIds":{"items":{"enum":"EU-RO-1"}}}}}}}`,
 			wantErr: "failed to decode RunPod OpenAPI schema",
 		},
 	}
