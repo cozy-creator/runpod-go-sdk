@@ -114,11 +114,22 @@ func NewValidationErrorWithValue(field, message string, value interface{}) *Vali
 type NoCapacityError struct {
 	GPUTypeID     string
 	DataCenterIDs []string
-	Cause         error
+	// NoMatchingHost reports that RunPod answered "no host matches this
+	// request" rather than "this SKU is out of stock" (rp#17). Both mean no
+	// pod was created; only this one may be a statement about the REQUEST's
+	// shape instead of about the market, because the shape terms (gpuCount,
+	// minRAMPerGPU, minVCPUPerGPU, containerDiskInGB, dataCenterIds) are the
+	// same on every candidate of a fan-out. One occurrence proves nothing;
+	// see FallbackExhaustedError.AllNoMatchingHost for the signal that does.
+	NoMatchingHost bool
+	Cause          error
 }
 
 func (e *NoCapacityError) Error() string {
 	msg := "no capacity"
+	if e.NoMatchingHost {
+		msg = "no host matched the requested pod shape"
+	}
 	if e.GPUTypeID != "" {
 		msg += fmt.Sprintf(" for GPU type %q", e.GPUTypeID)
 	}
@@ -149,6 +160,30 @@ type FallbackExhaustedError struct {
 	Attempts []FallbackAttempt
 }
 
+// AllNoMatchingHost reports that EVERY attempt answered "no host matched the
+// requested pod shape" (rp#17).
+//
+// This is the signal a single attempt cannot give. The shape terms of a
+// fan-out — gpuCount, minRAMPerGPU, minVCPUPerGPU, containerDiskInGB,
+// dataCenterIds — are identical on every candidate; only the GPU type varies.
+// So N different GPU types all answering "nothing matches" is far better
+// explained by ONE over-constrained request than by N simultaneous stock-outs,
+// and the caller should surface the request's shape rather than report the
+// market as sold out. False for an empty attempt list: no evidence is not
+// evidence.
+func (e *FallbackExhaustedError) AllNoMatchingHost() bool {
+	if len(e.Attempts) == 0 {
+		return false
+	}
+	for _, a := range e.Attempts {
+		var noCap *NoCapacityError
+		if !errors.As(a.Err, &noCap) || !noCap.NoMatchingHost {
+			return false
+		}
+	}
+	return true
+}
+
 func (e *FallbackExhaustedError) Error() string {
 	tried := make([]string, len(e.Attempts))
 	for i, a := range e.Attempts {
@@ -157,6 +192,14 @@ func (e *FallbackExhaustedError) Error() string {
 	last := "no attempts made"
 	if n := len(e.Attempts); n > 0 && e.Attempts[n-1].Err != nil {
 		last = e.Attempts[n-1].Err.Error()
+	}
+	if e.AllNoMatchingHost() {
+		// Loud on purpose: every candidate rejected the same shape, which is
+		// the signature of a request we constructed wrong, not of a stock-out.
+		return fmt.Sprintf("runpod: no host matched the requested pod shape on ANY of %d candidate GPU types %v"+
+			" — the request is more likely over-constrained (gpuCount / minRAMPerGPU / minVCPUPerGPU /"+
+			" containerDiskInGB / dataCenterIds) than the market sold out; last error: %s",
+			len(e.Attempts), tried, last)
 	}
 	return fmt.Sprintf("runpod: all %d candidate GPU types failed %v; last error: %s", len(e.Attempts), tried, last)
 }
