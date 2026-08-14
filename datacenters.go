@@ -8,10 +8,19 @@ import (
 // DataCenter is one RunPod placement location together with its current
 // per-GPU inventory. StockStatus is provider-owned telemetry (for example
 // High, Medium, Low); callers decide freshness and placement policy.
+//
+// StorageSupport is the provider's own answer to whether this location can
+// host a network volume at all. It is a property of the location, not of the
+// account or the request: where it is false, CreateNetworkVolume is refused
+// and no pod placed here can ever mount one. 30 of RunPod's 49 locations
+// answer false, so a caller that cannot see this field cannot distinguish a
+// datacenter whose cache is merely absent from one where a cache is
+// impossible.
 type DataCenter struct {
 	ID              string                        `json:"id"`
 	Name            string                        `json:"name"`
 	Location        string                        `json:"location"`
+	StorageSupport  bool                          `json:"storageSupport"`
 	GPUAvailability []GPUAvailabilityInDataCenter `json:"gpuAvailability"`
 }
 
@@ -64,6 +73,7 @@ query($input: GpuAvailabilityInput) {
     id
     name
     location
+    storageSupport
     gpuAvailability(input: $input) {
       gpuTypeId
       displayName

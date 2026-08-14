@@ -15,7 +15,8 @@ import (
 
 func TestListDataCenters(t *testing.T) {
 	server := newGPUTypeGraphQLServer(t, func(req testGraphQLRequest) interface{} {
-		if !strings.Contains(req.Query, "dataCenters") || !strings.Contains(req.Query, "gpuAvailability") {
+		if !strings.Contains(req.Query, "dataCenters") || !strings.Contains(req.Query, "gpuAvailability") ||
+			!strings.Contains(req.Query, "storageSupport") {
 			t.Fatalf("unexpected query: %s", req.Query)
 		}
 		input, ok := req.Variables["input"].(map[string]any)
@@ -25,6 +26,7 @@ func TestListDataCenters(t *testing.T) {
 		return map[string]any{"data": map[string]any{"dataCenters": []map[string]any{
 			{
 				"id": "US-GA-1", "name": "US-GA-1", "location": "United States",
+				"storageSupport": false,
 				"gpuAvailability": []map[string]any{
 					{"gpuTypeId": "NVIDIA GeForce RTX 4090", "displayName": "RTX 4090", "stockStatus": "High", "available": true},
 					{"gpuTypeId": "NVIDIA H100 80GB HBM3", "displayName": "H100 SXM", "stockStatus": "Low"},
@@ -32,6 +34,7 @@ func TestListDataCenters(t *testing.T) {
 			},
 			{
 				"id": "EU-RO-1", "name": "EU-RO-1", "location": "Europe",
+				"storageSupport": true,
 				"gpuAvailability": []map[string]any{
 					{"gpuTypeId": "NVIDIA A100 80GB PCIe", "displayName": "A100 PCIe", "stockStatus": "Medium"},
 				},
@@ -50,6 +53,11 @@ func TestListDataCenters(t *testing.T) {
 	}
 	if len(got) != 2 || got[0].ID != "US-GA-1" || got[1].ID != "EU-RO-1" {
 		t.Fatalf("data centers = %#v", got)
+	}
+	// A location that cannot host a network volume must be distinguishable
+	// from one that merely has no volume on it yet.
+	if got[0].StorageSupport || !got[1].StorageSupport {
+		t.Fatalf("storage support = %v/%v, want false/true", got[0].StorageSupport, got[1].StorageSupport)
 	}
 	if availability := got[0].GPUAvailability; len(availability) != 2 ||
 		availability[0].GPUTypeID != "NVIDIA GeForce RTX 4090" || availability[0].StockStatus != "High" || !availability[0].Available {
