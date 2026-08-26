@@ -129,6 +129,7 @@ func TestListPodsNormalizesNestedGPUCountInBothWireShapes(t *testing.T) {
 		costUSDMicros *int64
 	}{
 		{name: "legacy wrapper compatibility", body: `{"pods":[{"id":"pod-1","gpu":{"count":2}}]}`},
+		{name: "explicit null price", body: `[{"id":"pod-1","gpu":{"count":2},"costPerHr":null}]`},
 		{name: "bare number price", body: `[{"id":"pod-1","gpu":{"count":2},"costPerHr":0.123456}]`, costUSDMicros: int64Pointer(123456)},
 		{name: "quoted decimal price", body: `[{"id":"pod-1","gpu":{"count":2},"costPerHr":"0.74"}]`, costUSDMicros: int64Pointer(740000)},
 	}

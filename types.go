@@ -141,27 +141,27 @@ type Pod struct {
 // response rather than entering money policy with changed meaning.
 func (p *Pod) UnmarshalJSON(data []byte) error {
 	type podAlias Pod
-	var decoded podAlias
+	var alias podAlias
+	decoded := struct {
+		*podAlias
+		CostPerHr json.RawMessage `json:"costPerHr"`
+	}{podAlias: &alias}
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
-	*p = Pod(decoded)
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return err
-	}
-	raw, ok := fields["costPerHr"]
-	if !ok || strings.TrimSpace(string(raw)) == "null" {
+	if len(decoded.CostPerHr) == 0 || strings.TrimSpace(string(decoded.CostPerHr)) == "null" {
+		*p = Pod(alias)
 		return nil
 	}
-	micros, err := parseJSONUSDMicros(raw)
+	micros, err := parseJSONUSDMicros(decoded.CostPerHr)
 	if err != nil {
 		return fmt.Errorf("decode costPerHr: %w", err)
 	}
 	if micros < 0 {
 		return fmt.Errorf("decode costPerHr: list price cannot be negative")
 	}
-	p.ListHourlyCostUSDMicros = &micros
+	alias.ListHourlyCostUSDMicros = &micros
+	*p = Pod(alias)
 	return nil
 }
 
