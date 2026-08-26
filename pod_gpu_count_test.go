@@ -153,11 +153,11 @@ func TestListPodsNormalizesNestedGPUCountInBothWireShapes(t *testing.T) {
 				t.Fatalf("normalized pods = %+v, want one pod with count 2", pods)
 			}
 			if test.costUSDMicros == nil {
-				if pods[0].ListHourlyCostUSDMicros != nil {
-					t.Fatalf("ListHourlyCostUSDMicros = %d, want nil for %s", *pods[0].ListHourlyCostUSDMicros, test.body)
+				if pods[0].ListPriceUSDMicrosPerHour != nil {
+					t.Fatalf("ListPriceUSDMicrosPerHour = %d, want nil for %s", *pods[0].ListPriceUSDMicrosPerHour, test.body)
 				}
-			} else if pods[0].ListHourlyCostUSDMicros == nil || *pods[0].ListHourlyCostUSDMicros != *test.costUSDMicros {
-				t.Fatalf("ListHourlyCostUSDMicros = %v, want %d for %s", pods[0].ListHourlyCostUSDMicros, *test.costUSDMicros, test.body)
+			} else if pods[0].ListPriceUSDMicrosPerHour == nil || *pods[0].ListPriceUSDMicrosPerHour != *test.costUSDMicros {
+				t.Fatalf("ListPriceUSDMicrosPerHour = %v, want %d for %s", pods[0].ListPriceUSDMicrosPerHour, *test.costUSDMicros, test.body)
 			}
 		})
 	}
