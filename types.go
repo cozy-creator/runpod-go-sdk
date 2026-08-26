@@ -158,6 +158,9 @@ func (p *Pod) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return fmt.Errorf("decode costPerHr: %w", err)
 	}
+	if micros < 0 {
+		return fmt.Errorf("decode costPerHr: list price cannot be negative")
+	}
 	p.ListHourlyCostUSDMicros = &micros
 	return nil
 }

@@ -165,12 +165,16 @@ func TestListPodsNormalizesNestedGPUCountInBothWireShapes(t *testing.T) {
 func int64Pointer(value int64) *int64 { return &value }
 
 func TestListPodsRefusesSubMicroPrice(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `[{"id":"pod-1","costPerHr":0.0000001}]`)
-	}))
-	defer server.Close()
-	client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL))
-	if _, err := client.ListPods(context.Background(), nil); err == nil {
-		t.Fatal("sub-micro provider price must refuse rather than round")
+	for _, price := range []string{`0.0000001`, `-0.01`} {
+		t.Run(price, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				fmt.Fprintf(w, `[{"id":"pod-1","costPerHr":%s}]`, price)
+			}))
+			defer server.Close()
+			client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL))
+			if _, err := client.ListPods(context.Background(), nil); err == nil {
+				t.Fatalf("invalid provider list price %s must refuse", price)
+			}
+		})
 	}
 }
