@@ -110,23 +110,22 @@ type Pod struct {
 	ContainerDiskInGB int     `json:"containerDiskInGb"`
 	VolumeInGB        int     `json:"volumeInGb"`
 	VolumeMountPath   string  `json:"volumeMountPath"`
-	// HourlyCostUSDMicros is RunPod's costPerHr translated exactly once from
-	// its JSON decimal. Nil means the provider omitted/null-ed the field;
-	// callers making money decisions must not infer that absence is free.
-	HourlyCostUSDMicros *int64            `json:"-"`
-	MachineID           string            `json:"machineId"`
-	CreatedAt           *JSONTime         `json:"createdAt"`
-	Env                 map[string]string `json:"env"`
-	Ports               []string          `json:"ports"`
-	LastStartedAt       *JSONTime         `json:"lastStartedAt"`
-	AdjustedCostPerHr   float64           `json:"adjustedCostPerHr"`
-	Locked              bool              `json:"locked"`
-	Interruptible       bool              `json:"interruptible"`
-	PublicIP            string            `json:"publicIp,omitempty"`
-	Runtime             *PodRuntime       `json:"runtime,omitempty"`
-	Machine             *Machine          `json:"machine,omitempty"`
-	NetworkVolume       *NetworkVolume    `json:"networkVolume,omitempty"`
-	NetworkVolumeID     string            `json:"networkVolumeId,omitempty"`
+	// ListHourlyCostUSDMicros is RunPod's costPerHr list price translated
+	// exactly once from its JSON decimal. Nil means the provider omitted/null-ed
+	// the field; callers making money decisions must not infer absence is free.
+	ListHourlyCostUSDMicros *int64            `json:"-"`
+	MachineID               string            `json:"machineId"`
+	CreatedAt               *JSONTime         `json:"createdAt"`
+	Env                     map[string]string `json:"env"`
+	Ports                   []string          `json:"ports"`
+	LastStartedAt           *JSONTime         `json:"lastStartedAt"`
+	Locked                  bool              `json:"locked"`
+	Interruptible           bool              `json:"interruptible"`
+	PublicIP                string            `json:"publicIp,omitempty"`
+	Runtime                 *PodRuntime       `json:"runtime,omitempty"`
+	Machine                 *Machine          `json:"machine,omitempty"`
+	NetworkVolume           *NetworkVolume    `json:"networkVolume,omitempty"`
+	NetworkVolumeID         string            `json:"networkVolumeId,omitempty"`
 
 	// CPU-pod-specific response fields. RunPod's REST `POST /pods` returns
 	// `cpuFlavorId` (the family the instance was placed on, e.g. "cpu3c")
@@ -155,15 +154,11 @@ func (p *Pod) UnmarshalJSON(data []byte) error {
 	if !ok || strings.TrimSpace(string(raw)) == "null" {
 		return nil
 	}
-	var decimal json.Number
-	if err := json.Unmarshal(raw, &decimal); err != nil {
-		return fmt.Errorf("decode costPerHr: %w", err)
-	}
-	micros, err := parseUSDMicros(decimal.String())
+	micros, err := parseJSONUSDMicros(raw)
 	if err != nil {
 		return fmt.Errorf("decode costPerHr: %w", err)
 	}
-	p.HourlyCostUSDMicros = &micros
+	p.ListHourlyCostUSDMicros = &micros
 	return nil
 }
 

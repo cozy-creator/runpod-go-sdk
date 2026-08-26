@@ -129,7 +129,8 @@ func TestListPodsNormalizesNestedGPUCountInBothWireShapes(t *testing.T) {
 		costUSDMicros *int64
 	}{
 		{name: "legacy wrapper compatibility", body: `{"pods":[{"id":"pod-1","gpu":{"count":2}}]}`},
-		{name: "documented bare array with exact price", body: `[{"id":"pod-1","gpu":{"count":2},"costPerHr":0.123456}]`, costUSDMicros: int64Pointer(123456)},
+		{name: "bare number price", body: `[{"id":"pod-1","gpu":{"count":2},"costPerHr":0.123456}]`, costUSDMicros: int64Pointer(123456)},
+		{name: "quoted decimal price", body: `[{"id":"pod-1","gpu":{"count":2},"costPerHr":"0.74"}]`, costUSDMicros: int64Pointer(740000)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -151,11 +152,11 @@ func TestListPodsNormalizesNestedGPUCountInBothWireShapes(t *testing.T) {
 				t.Fatalf("normalized pods = %+v, want one pod with count 2", pods)
 			}
 			if test.costUSDMicros == nil {
-				if pods[0].HourlyCostUSDMicros != nil {
-					t.Fatalf("HourlyCostUSDMicros = %d, want nil for %s", *pods[0].HourlyCostUSDMicros, test.body)
+				if pods[0].ListHourlyCostUSDMicros != nil {
+					t.Fatalf("ListHourlyCostUSDMicros = %d, want nil for %s", *pods[0].ListHourlyCostUSDMicros, test.body)
 				}
-			} else if pods[0].HourlyCostUSDMicros == nil || *pods[0].HourlyCostUSDMicros != *test.costUSDMicros {
-				t.Fatalf("HourlyCostUSDMicros = %v, want %d for %s", pods[0].HourlyCostUSDMicros, *test.costUSDMicros, test.body)
+			} else if pods[0].ListHourlyCostUSDMicros == nil || *pods[0].ListHourlyCostUSDMicros != *test.costUSDMicros {
+				t.Fatalf("ListHourlyCostUSDMicros = %v, want %d for %s", pods[0].ListHourlyCostUSDMicros, *test.costUSDMicros, test.body)
 			}
 		})
 	}

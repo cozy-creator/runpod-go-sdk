@@ -1,12 +1,36 @@
 package runpod
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/big"
+	"regexp"
 	"strings"
 )
 
 const usdMicrosPerUSD int64 = 1_000_000
+
+var jsonDecimalPattern = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$`)
+
+// parseJSONUSDMicros accepts the two exact currency representations RunPod
+// returns: a JSON number or a quoted JSON decimal. Null remains absence.
+func parseJSONUSDMicros(raw json.RawMessage) (int64, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return 0, fmt.Errorf("USD decimal is absent")
+	}
+	if strings.HasPrefix(trimmed, `"`) {
+		var quoted string
+		if err := json.Unmarshal(raw, &quoted); err != nil {
+			return 0, fmt.Errorf("invalid quoted USD decimal: %w", err)
+		}
+		trimmed = quoted
+	}
+	if !jsonDecimalPattern.MatchString(trimmed) {
+		return 0, fmt.Errorf("invalid USD decimal %q", trimmed)
+	}
+	return parseUSDMicros(trimmed)
+}
 
 // parseUSDMicros converts one exact provider JSON decimal to integer USD
 // micros. Sub-micro values and int64 overflow refuse; the SDK never rounds or

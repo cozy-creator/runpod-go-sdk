@@ -36,7 +36,7 @@ func (c *Client) GetAccountID(ctx context.Context) (string, error) {
 func (c *Client) GetClientBalanceUSDMicros(ctx context.Context) (int64, error) {
 	var result struct {
 		Myself *struct {
-			ClientBalance *json.Number `json:"clientBalance"`
+			ClientBalance json.RawMessage `json:"clientBalance"`
 		} `json:"myself"`
 	}
 	if err := c.GraphQL(ctx, clientBalanceQuery, nil, &result); err != nil {
@@ -45,10 +45,10 @@ func (c *Client) GetClientBalanceUSDMicros(ctx context.Context) (int64, error) {
 	if result.Myself == nil {
 		return 0, fmt.Errorf("get RunPod client balance: response omitted myself")
 	}
-	if result.Myself.ClientBalance == nil {
+	if len(result.Myself.ClientBalance) == 0 || strings.TrimSpace(string(result.Myself.ClientBalance)) == "null" {
 		return 0, fmt.Errorf("get RunPod client balance: response omitted myself.clientBalance")
 	}
-	micros, err := parseUSDMicros(result.Myself.ClientBalance.String())
+	micros, err := parseJSONUSDMicros(result.Myself.ClientBalance)
 	if err != nil {
 		return 0, fmt.Errorf("get RunPod client balance: %w", err)
 	}
