@@ -1,9 +1,11 @@
 package runpod
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"path"
 	"sort"
@@ -53,18 +55,23 @@ func (c *Client) PrepareCreatePod(req *CreatePodRequest) ([]byte, error) {
 	return body, nil
 }
 
-// ExecuteCreatePod sends a body returned by PrepareCreatePod without
-// re-marshaling it. The bytes are validated again so corrupt or incompatible
-// durable records are refused before the wire; validation never changes the
-// bytes sent.
-func (c *Client) ExecuteCreatePod(ctx context.Context, prepared []byte) (*Pod, error) {
+// InspectPreparedCreatePod decodes and validates exact bytes previously
+// returned by PrepareCreatePod without changing them. Durable controllers use
+// the returned provider-shaped request to prove that a recorded obligation
+// still names the SKU, count, datacenter, and volume they authorized.
+func (c *Client) InspectPreparedCreatePod(prepared []byte) (*CreatePodRequest, error) {
 	if len(prepared) == 0 {
 		return nil, NewValidationError("prepared", "cannot be empty")
 	}
-	body := append([]byte(nil), prepared...)
+	dec := json.NewDecoder(bytes.NewReader(prepared))
+	dec.DisallowUnknownFields()
 	var req CreatePodRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, NewValidationError("prepared", "must be a valid pod-create JSON object")
+	if err := dec.Decode(&req); err != nil {
+		return nil, NewValidationError("prepared", "must be a valid closed pod-create JSON object")
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		return nil, NewValidationError("prepared", "must contain exactly one pod-create JSON object")
 	}
 	if err := c.validateCreatePodRequest(&req); err != nil {
 		return nil, err
@@ -72,11 +79,24 @@ func (c *Client) ExecuteCreatePod(ctx context.Context, prepared []byte) (*Pod, e
 	if !strings.EqualFold(strings.TrimSpace(req.ComputeType), "CPU") && len(req.GPUTypeIDs) != 1 {
 		return nil, NewValidationError("gpuTypeIds", "must contain exactly one type for a prepared create")
 	}
+	return &req, nil
+}
+
+// ExecuteCreatePod sends a body returned by PrepareCreatePod without
+// re-marshaling it. The bytes are validated again so corrupt or incompatible
+// durable records are refused before the wire; validation never changes the
+// bytes sent.
+func (c *Client) ExecuteCreatePod(ctx context.Context, prepared []byte) (*Pod, error) {
+	body := append([]byte(nil), prepared...)
+	req, err := c.InspectPreparedCreatePod(body)
+	if err != nil {
+		return nil, err
+	}
 
 	var pod Pod
-	err := c.postBytes(ctx, "/pods", body, &pod)
+	err = c.postBytes(ctx, "/pods", body, &pod)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create pod: %w", classifyCreatePodError(err, &req))
+		return nil, fmt.Errorf("failed to create pod: %w", classifyCreatePodError(err, req))
 	}
 
 	pod.normalize()

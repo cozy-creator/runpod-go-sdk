@@ -45,6 +45,27 @@ func TestExecuteCreatePodSendsPreparedBytesUnchanged(t *testing.T) {
 	}
 }
 
+func TestInspectPreparedCreatePodReturnsRecordedPlacement(t *testing.T) {
+	client := mustClient(t, "test_key")
+	prepared, err := client.PrepareCreatePod(&runpod.CreatePodRequest{
+		Name: "obligation-1", ImageName: "img", GPUTypeIDs: []string{"NVIDIA H200"},
+		GPUCount: 2, DataCenterIDs: []string{"EU-RO-1"}, ContainerDiskInGB: 100,
+		NetworkVolumeID: "volume-1", VolumeMountPath: "/workspace",
+	})
+	if err != nil {
+		t.Fatalf("PrepareCreatePod: %v", err)
+	}
+	got, err := client.InspectPreparedCreatePod(prepared)
+	if err != nil {
+		t.Fatalf("InspectPreparedCreatePod: %v", err)
+	}
+	if len(got.GPUTypeIDs) != 1 || got.GPUTypeIDs[0] != "NVIDIA H200" ||
+		got.GPUCount != 2 || len(got.DataCenterIDs) != 1 || got.DataCenterIDs[0] != "EU-RO-1" ||
+		got.NetworkVolumeID != "volume-1" || got.VolumeMountPath != "/workspace" {
+		t.Fatalf("inspected placement = %#v", got)
+	}
+}
+
 func TestCreatePodGPUResourceMinimaWireFormat(t *testing.T) {
 	requestNumber := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
