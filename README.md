@@ -213,7 +213,7 @@ case errors.Is(err, runpod.ErrNoCapacity):
 }
 ```
 
-`GetClientBalanceUSD` returns the provider's exact JSON decimal balance, including a real zero, and refuses omitted/null balance data.
+`GetClientBalanceUSDMicros` returns the provider balance as exact integer USD micros, including a real zero, and refuses omitted/null, sub-micro, or overflowing balance data.
 
 ## Testing
 

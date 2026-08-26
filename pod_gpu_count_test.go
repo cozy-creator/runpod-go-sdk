@@ -124,12 +124,12 @@ func TestGetPodGPUCountNormalization(t *testing.T) {
 
 func TestListPodsNormalizesNestedGPUCountInBothWireShapes(t *testing.T) {
 	tests := []struct {
-		name string
-		body string
-		cost string
+		name          string
+		body          string
+		costUSDMicros *int64
 	}{
 		{name: "legacy wrapper compatibility", body: `{"pods":[{"id":"pod-1","gpu":{"count":2}}]}`},
-		{name: "documented bare array with exact price", body: `[{"id":"pod-1","gpu":{"count":2},"costPerHr":0.123456}]`, cost: "0.123456"},
+		{name: "documented bare array with exact price", body: `[{"id":"pod-1","gpu":{"count":2},"costPerHr":0.123456}]`, costUSDMicros: int64Pointer(123456)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -150,13 +150,26 @@ func TestListPodsNormalizesNestedGPUCountInBothWireShapes(t *testing.T) {
 			if len(pods) != 1 || pods[0].GPUCount != 2 {
 				t.Fatalf("normalized pods = %+v, want one pod with count 2", pods)
 			}
-			if test.cost == "" {
-				if pods[0].CostPerHourUSD != nil {
-					t.Fatalf("CostPerHourUSD = %q, want nil for %s", pods[0].CostPerHourUSD, test.body)
+			if test.costUSDMicros == nil {
+				if pods[0].HourlyCostUSDMicros != nil {
+					t.Fatalf("HourlyCostUSDMicros = %d, want nil for %s", *pods[0].HourlyCostUSDMicros, test.body)
 				}
-			} else if pods[0].CostPerHourUSD == nil || pods[0].CostPerHourUSD.String() != test.cost {
-				t.Fatalf("CostPerHourUSD = %v, want %s for %s", pods[0].CostPerHourUSD, test.cost, test.body)
+			} else if pods[0].HourlyCostUSDMicros == nil || *pods[0].HourlyCostUSDMicros != *test.costUSDMicros {
+				t.Fatalf("HourlyCostUSDMicros = %v, want %d for %s", pods[0].HourlyCostUSDMicros, *test.costUSDMicros, test.body)
 			}
 		})
+	}
+}
+
+func int64Pointer(value int64) *int64 { return &value }
+
+func TestListPodsRefusesSubMicroPrice(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `[{"id":"pod-1","costPerHr":0.0000001}]`)
+	}))
+	defer server.Close()
+	client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL))
+	if _, err := client.ListPods(context.Background(), nil); err == nil {
+		t.Fatal("sub-micro provider price must refuse rather than round")
 	}
 }
