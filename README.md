@@ -123,15 +123,17 @@ Static data is verified against the live `gpuTypes` query by a live-gated test; 
 ```go
 offers, _ := client.ListGPUOffers(ctx, &runpod.GPUOfferFilter{MinCudaVersion: "12.8", InStockOnly: true})
 offer := offers[0] // cheapest in stock
+minimumBid, hasSpotFloor := offer.MinimumBidPerGPUUSDMicrosPerHour()
+if !hasSpotFloor { /* choose on-demand or another offer */ }
 pod, err := client.CreateSpotPod(ctx, &runpod.CreatePodRequest{
     // ...
     GPUTypeIDs: []string{offer.GPUTypeID},
     CloudType:  offer.CloudType,
-    BidPerGPUUSDMicrosPerHour: offer.MinimumBidPriceUSDMicrosPerHour,
+    BidPerGPUUSDMicrosPerHour: minimumBid,
 })
 ```
 
-Spot pricing: RunPod removed `interruptablePrice` (and `cudaVersion`) from the `lowestPrice` GraphQL type; `MinimumBidPriceUSDMicrosPerHour` — the exact spot bid floor — is the only spot pricing signal the API still exposes.
+Spot pricing: RunPod removed `interruptablePrice` (and `cudaVersion`) from the `lowestPrice` GraphQL type. The optional aggregate `MinimumBidPriceUSDMicrosPerHour` is the only spot signal still exposed; use `MinimumBidPerGPUUSDMicrosPerHour` for a ceil-safe executable bid.
 
 Reclaim: a preempted spot pod is stopped, not deleted — it reports `desiredStatus="EXITED"` with the runtime cleared. There is no dedicated preemption signal in the public API; treat an unexpected EXITED on an interruptible pod as a probable reclaim. Datacenter-level offer granularity is not exposed by the `lowestPrice` query; constrain placement with `DataCenterIDs`.
 

@@ -21,16 +21,28 @@ type GPUOffer struct {
 	// OnDemandPriceUSDMicrosPerHour is the aggregate uninterruptible list-price
 	// rate for GPUCount GPUs.
 	OnDemandPriceUSDMicrosPerHour USDMicrosPerHour
-	// MinimumBidPriceUSDMicrosPerHour is the aggregate spot-market floor for
-	// GPUCount GPUs. REST CreatePodRequest.BidPerGPUUSDMicrosPerHour expects a
-	// per-GPU rate, so callers
-	// must divide this value by GPUCount before using it there. RunPod no longer
-	// reports a separate interruptible/spot price on LowestPrice — this
-	// floor is the only spot pricing signal exposed.
-	MinimumBidPriceUSDMicrosPerHour USDMicrosPerHour
+	// MinimumBidPriceUSDMicrosPerHour is the optional aggregate spot-market
+	// floor for GPUCount GPUs. It is not directly executable as a per-GPU bid;
+	// use MinimumBidPerGPUUSDMicrosPerHour for a ceil-safe conversion.
+	MinimumBidPriceUSDMicrosPerHour *USDMicrosPerHour
 	// AvailableGPUCounts is the set of whole-pod GPU counts currently
 	// reported for this exact GPU type/cloud price surface.
 	AvailableGPUCounts []int
+}
+
+// MinimumBidPerGPUUSDMicrosPerHour converts RunPod's aggregate floor to the
+// per-GPU rate expected by CreatePodRequest without ever bidding below it.
+func (o GPUOffer) MinimumBidPerGPUUSDMicrosPerHour() (USDMicrosPerHour, bool) {
+	if o.MinimumBidPriceUSDMicrosPerHour == nil || o.GPUCount <= 0 {
+		return 0, false
+	}
+	aggregate := int64(*o.MinimumBidPriceUSDMicrosPerHour)
+	count := int64(o.GPUCount)
+	perGPU := aggregate / count
+	if aggregate%count != 0 {
+		perGPU++
+	}
+	return USDMicrosPerHour(perGPU), true
 }
 
 // GPUOfferFilter constrains ListGPUOffers. Zero value = all offers for one

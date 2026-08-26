@@ -90,7 +90,7 @@ func New() *Server {
 			SecureCloud:    true,
 			CommunityCloud: spec.Consumer,
 			LowestPrice: &runpod.Price{
-				MinimumBidPriceUSDMicrosPerHour: 100_000,
+				MinimumBidPriceUSDMicrosPerHour: usdMicrosPerHourPointer(100_000),
 				OnDemandPriceUSDMicrosPerHour:   300_000,
 				StockStatus:                     "High",
 			},
@@ -98,6 +98,10 @@ func New() *Server {
 	}
 	s.httpServer = httptest.NewServer(http.HandlerFunc(s.handle))
 	return s
+}
+
+func usdMicrosPerHourPointer(value runpod.USDMicrosPerHour) *runpod.USDMicrosPerHour {
+	return &value
 }
 
 // URL returns the server's base URL (REST, serverless and GraphQL share it).

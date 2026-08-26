@@ -36,7 +36,7 @@ func TestListGPUOffers(t *testing.T) {
 		_, _ = w.Write([]byte(`{"data":{"gpuTypes":[
 			{"id":"gpu-both","displayName":"Both","memoryInGb":24,"secureCloud":true,"communityCloud":true,
 			 "secure":{"minimumBidPrice":0.2,"uninterruptablePrice":0.6,"stockStatus":"High"},
-			 "community":{"minimumBidPrice":"0.1","uninterruptablePrice":"0.4","stockStatus":"Low"}},
+			 "community":{"minimumBidPrice":"0.100001","uninterruptablePrice":"0.4","stockStatus":"Low"}},
 			{"id":"gpu-secure-only","displayName":"SecureOnly","memoryInGb":80,"secureCloud":true,"communityCloud":false,
 			 "secure":{"minimumBidPrice":1.0,"uninterruptablePrice":2.0,"stockStatus":"High"},
 			 "community":null},
@@ -66,8 +66,12 @@ func TestListGPUOffers(t *testing.T) {
 	if offers[1].CloudType != "SECURE" || offers[1].GPUTypeID != "gpu-both" {
 		t.Errorf("second offer wrong: %+v", offers[1])
 	}
-	if offers[2].GPUTypeID != "gpu-secure-only" || offers[2].MinimumBidPriceUSDMicrosPerHour != 1_000_000 {
+	if offers[2].GPUTypeID != "gpu-secure-only" || offers[2].MinimumBidPriceUSDMicrosPerHour == nil ||
+		*offers[2].MinimumBidPriceUSDMicrosPerHour != 1_000_000 {
 		t.Errorf("third offer wrong: %+v", offers[2])
+	}
+	if floor, ok := offers[0].MinimumBidPerGPUUSDMicrosPerHour(); !ok || floor != 50_001 {
+		t.Errorf("ceil-safe per-GPU floor = %d, %t; want 50001, true", floor, ok)
 	}
 	for _, offer := range offers {
 		if offer.GPUCount != 2 {
@@ -87,9 +91,9 @@ func TestListGPUOffersRejectsInvalidShape(t *testing.T) {
 
 func TestListGPUOffersRefusesInexactOrMissingPrices(t *testing.T) {
 	for name, price := range map[string]string{
-		"missing minimum": `{"uninterruptablePrice":0.4,"stockStatus":"High"}`,
-		"sub-micro":       `{"minimumBidPrice":0.0000001,"uninterruptablePrice":0.4,"stockStatus":"High"}`,
-		"overflow":        `{"minimumBidPrice":0.1,"uninterruptablePrice":"9223372036854.775808","stockStatus":"High"}`,
+		"missing on-demand": `{"minimumBidPrice":0.1,"stockStatus":"High"}`,
+		"sub-micro":         `{"minimumBidPrice":0.0000001,"uninterruptablePrice":0.4,"stockStatus":"High"}`,
+		"overflow":          `{"minimumBidPrice":0.1,"uninterruptablePrice":"9223372036854.775808","stockStatus":"High"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -101,6 +105,18 @@ func TestListGPUOffersRefusesInexactOrMissingPrices(t *testing.T) {
 				t.Fatal("purchase-authority price must refuse")
 			}
 		})
+	}
+}
+
+func TestListGPUOffersAllowsMissingSpotFloor(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"data":{"gpuTypes":[{"id":"gpu","secureCloud":true,"secure":{"uninterruptablePrice":"0.4","stockStatus":"High"}}]}}`)
+	}))
+	defer server.Close()
+	client := mustClient(t, "test_key", runpod.WithGraphQLBaseURL(server.URL))
+	offers, err := client.ListGPUOffers(t.Context(), nil)
+	if err != nil || len(offers) != 1 || offers[0].MinimumBidPriceUSDMicrosPerHour != nil {
+		t.Fatalf("offers = %+v, %v; want one on-demand offer with no spot floor", offers, err)
 	}
 }
 

@@ -113,7 +113,7 @@ type Pod struct {
 	// ListPriceUSDMicrosPerHour is RunPod's costPerHr list price translated
 	// exactly once from its JSON decimal. Nil means the provider omitted/null-ed
 	// the field; callers making money decisions must not infer absence is free.
-	ListPriceUSDMicrosPerHour *int64            `json:"-"`
+	ListPriceUSDMicrosPerHour *USDMicrosPerHour `json:"-"`
 	MachineID                 string            `json:"machineId"`
 	CreatedAt                 *JSONTime         `json:"createdAt"`
 	Env                       map[string]string `json:"env"`
@@ -144,23 +144,12 @@ func (p *Pod) UnmarshalJSON(data []byte) error {
 	var alias podAlias
 	decoded := struct {
 		*podAlias
-		CostPerHr json.RawMessage `json:"costPerHr"`
+		CostPerHr *USDMicrosPerHour `json:"costPerHr"`
 	}{podAlias: &alias}
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
-	if len(decoded.CostPerHr) == 0 || strings.TrimSpace(string(decoded.CostPerHr)) == "null" {
-		*p = Pod(alias)
-		return nil
-	}
-	micros, err := parseJSONUSDMicros(decoded.CostPerHr)
-	if err != nil {
-		return fmt.Errorf("decode costPerHr: %w", err)
-	}
-	if micros < 0 {
-		return fmt.Errorf("decode costPerHr: list price cannot be negative")
-	}
-	alias.ListPriceUSDMicrosPerHour = &micros
+	alias.ListPriceUSDMicrosPerHour = decoded.CostPerHr
 	*p = Pod(alias)
 	return nil
 }
@@ -348,9 +337,9 @@ type GPUType struct {
 // to that query. RunPod removed interruptablePrice and cudaVersion from
 // LowestPrice; the minimum bid is the only spot signal still exposed.
 type Price struct {
-	MinimumBidPriceUSDMicrosPerHour USDMicrosPerHour `json:"-"`
-	OnDemandPriceUSDMicrosPerHour   USDMicrosPerHour `json:"-"`
-	StockStatus                     string           `json:"stockStatus,omitempty"`
+	MinimumBidPriceUSDMicrosPerHour *USDMicrosPerHour `json:"-"`
+	OnDemandPriceUSDMicrosPerHour   USDMicrosPerHour  `json:"-"`
+	StockStatus                     string            `json:"stockStatus,omitempty"`
 	// AvailableGPUCounts is the set of whole-pod GPU counts RunPod currently
 	// reports as rentable for this exact lowest-price query.
 	AvailableGPUCounts []int `json:"availableGpuCounts,omitempty"`
@@ -366,11 +355,11 @@ func (p *Price) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
 	}
-	if wire.MinimumBidPrice == nil || wire.UninterruptablePrice == nil {
-		return fmt.Errorf("RunPod lowestPrice omitted an hourly price")
+	if wire.UninterruptablePrice == nil {
+		return fmt.Errorf("RunPod lowestPrice omitted its on-demand hourly price")
 	}
 	*p = Price{
-		MinimumBidPriceUSDMicrosPerHour: *wire.MinimumBidPrice,
+		MinimumBidPriceUSDMicrosPerHour: wire.MinimumBidPrice,
 		OnDemandPriceUSDMicrosPerHour:   *wire.UninterruptablePrice,
 		StockStatus:                     wire.StockStatus,
 		AvailableGPUCounts:              wire.AvailableGPUCounts,
@@ -380,10 +369,10 @@ func (p *Price) UnmarshalJSON(data []byte) error {
 
 func (p Price) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		MinimumBidPrice      USDMicrosPerHour `json:"minimumBidPrice"`
-		UninterruptablePrice USDMicrosPerHour `json:"uninterruptablePrice"`
-		StockStatus          string           `json:"stockStatus,omitempty"`
-		AvailableGPUCounts   []int            `json:"availableGpuCounts,omitempty"`
+		MinimumBidPrice      *USDMicrosPerHour `json:"minimumBidPrice,omitempty"`
+		UninterruptablePrice USDMicrosPerHour  `json:"uninterruptablePrice"`
+		StockStatus          string            `json:"stockStatus,omitempty"`
+		AvailableGPUCounts   []int             `json:"availableGpuCounts,omitempty"`
 	}{
 		MinimumBidPrice:      p.MinimumBidPriceUSDMicrosPerHour,
 		UninterruptablePrice: p.OnDemandPriceUSDMicrosPerHour,

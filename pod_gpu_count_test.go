@@ -126,12 +126,12 @@ func TestListPodsNormalizesNestedGPUCountInBothWireShapes(t *testing.T) {
 	tests := []struct {
 		name          string
 		body          string
-		costUSDMicros *int64
+		costUSDMicros *runpod.USDMicrosPerHour
 	}{
 		{name: "legacy wrapper compatibility", body: `{"pods":[{"id":"pod-1","gpu":{"count":2}}]}`},
 		{name: "explicit null price", body: `[{"id":"pod-1","gpu":{"count":2},"costPerHr":null}]`},
-		{name: "bare number price", body: `[{"id":"pod-1","gpu":{"count":2},"costPerHr":0.123456}]`, costUSDMicros: int64Pointer(123456)},
-		{name: "quoted decimal price", body: `[{"id":"pod-1","gpu":{"count":2},"costPerHr":"0.74"}]`, costUSDMicros: int64Pointer(740000)},
+		{name: "bare number price", body: `[{"id":"pod-1","gpu":{"count":2},"costPerHr":0.123456}]`, costUSDMicros: usdRatePointer(123456)},
+		{name: "quoted decimal price", body: `[{"id":"pod-1","gpu":{"count":2},"costPerHr":"0.74"}]`, costUSDMicros: usdRatePointer(740000)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -163,7 +163,7 @@ func TestListPodsNormalizesNestedGPUCountInBothWireShapes(t *testing.T) {
 	}
 }
 
-func int64Pointer(value int64) *int64 { return &value }
+func usdRatePointer(value runpod.USDMicrosPerHour) *runpod.USDMicrosPerHour { return &value }
 
 func TestListPodsRefusesSubMicroPrice(t *testing.T) {
 	for _, price := range []string{`0.0000001`, `-0.01`} {

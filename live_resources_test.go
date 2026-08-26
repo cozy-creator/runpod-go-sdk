@@ -99,6 +99,10 @@ func TestSpotPodReclaimLive(t *testing.T) {
 		t.Fatalf("no offers: %v", err)
 	}
 	offer := offers[0] // cheapest in stock
+	minimumBid, ok := offer.MinimumBidPerGPUUSDMicrosPerHour()
+	if !ok {
+		t.Skip("cheapest offer has no current spot floor")
+	}
 
 	pod, err := client.CreateSpotPod(ctx, &runpod.CreatePodRequest{
 		Name:                      "sdk-live-spot-test",
@@ -107,7 +111,7 @@ func TestSpotPodReclaimLive(t *testing.T) {
 		GPUCount:                  1,
 		ContainerDiskInGB:         10,
 		CloudType:                 offer.CloudType,
-		BidPerGPUUSDMicrosPerHour: offer.MinimumBidPriceUSDMicrosPerHour,
+		BidPerGPUUSDMicrosPerHour: minimumBid,
 	})
 	if err != nil {
 		t.Fatalf("CreateSpotPod: %v", err)
@@ -117,7 +121,7 @@ func TestSpotPodReclaimLive(t *testing.T) {
 			t.Errorf("cleanup TerminatePod: %v", err)
 		}
 	}()
-	t.Logf("spot pod %s created on %s bid=%d USD micros/hour", pod.ID, offer.GPUTypeID, offer.MinimumBidPriceUSDMicrosPerHour)
+	t.Logf("spot pod %s created on %s bid=%d USD micros/hour", pod.ID, offer.GPUTypeID, minimumBid)
 
 	got, err := client.GetPod(ctx, pod.ID)
 	if err != nil {
