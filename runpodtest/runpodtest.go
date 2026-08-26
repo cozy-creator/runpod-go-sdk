@@ -90,9 +90,9 @@ func New() *Server {
 			SecureCloud:    true,
 			CommunityCloud: spec.Consumer,
 			LowestPrice: &runpod.Price{
-				MinimumBidPrice:      0.10,
-				UninterruptablePrice: 0.30,
-				StockStatus:          "High",
+				MinimumBidPriceUSDMicrosPerHour: 100_000,
+				OnDemandPriceUSDMicrosPerHour:   300_000,
+				StockStatus:                     "High",
 			},
 		})
 	}

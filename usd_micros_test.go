@@ -46,3 +46,18 @@ func TestParseJSONUSDMicrosRefusesInvalidValues(t *testing.T) {
 		})
 	}
 }
+
+func TestUSDMicrosPerHourJSONUsesExactDollarDecimals(t *testing.T) {
+	for micros, want := range map[USDMicrosPerHour]string{
+		0: "0", 1: "0.000001", 250_000: "0.25", 1_000_001: "1.000001",
+	} {
+		got, err := json.Marshal(micros)
+		if err != nil || string(got) != want {
+			t.Fatalf("Marshal(%d) = %s, %v; want %s, nil", micros, got, err, want)
+		}
+		var roundTrip USDMicrosPerHour
+		if err := json.Unmarshal(got, &roundTrip); err != nil || roundTrip != micros {
+			t.Fatalf("Unmarshal(%s) = %d, %v; want %d, nil", got, roundTrip, err, micros)
+		}
+	}
+}

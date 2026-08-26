@@ -475,14 +475,6 @@ func (c *Client) validatePositive(fieldName string, value int) error {
 	return nil
 }
 
-// validatePositiveFloat checks if a float is positive
-func (c *Client) validatePositiveFloat(fieldName string, value float64) error {
-	if value <= 0 {
-		return NewValidationErrorWithValue(fieldName, "must be positive", value)
-	}
-	return nil
-}
-
 // buildURLWithParams builds a URL with query parameters
 func (c *Client) buildURLWithParams(endpoint string, params map[string]string) string {
 	baseURL := c.buildURL(endpoint)

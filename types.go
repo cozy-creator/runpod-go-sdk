@@ -255,13 +255,11 @@ type CreatePodRequest struct {
 	CloudType         string            `json:"cloudType,omitempty"`     // "SECURE" or "COMMUNITY"
 	Interruptible     bool              `json:"interruptible,omitempty"` // spot/interruptible instance
 
-	// BidPerGPU is the per-GPU bid price (USD/hr) for interruptible pods.
-	// Only valid when Interruptible is true. When omitted RunPod uses the
-	// current minimum bid. Get the market floor from ListGPUOffers /
-	// ListAvailableGPUs (Price.MinimumBidPrice).
-	BidPerGPU       float64 `json:"bidPerGpu,omitempty"`
-	SupportPublicIP bool    `json:"supportPublicIp,omitempty"`
-	TemplateID      string  `json:"templateId,omitempty"`
+	// BidPerGPUUSDMicrosPerHour is the exact per-GPU bid rate for an
+	// interruptible pod. Zero omits it and lets RunPod use the current floor.
+	BidPerGPUUSDMicrosPerHour USDMicrosPerHour `json:"bidPerGpu,omitempty"`
+	SupportPublicIP           bool             `json:"supportPublicIp,omitempty"`
+	TemplateID                string           `json:"templateId,omitempty"`
 
 	AllowedCudaVersions []string `json:"allowedCudaVersions,omitempty"`
 	MinCudaVersion      string   `json:"minCudaVersion,omitempty"`
@@ -346,16 +344,52 @@ type GPUType struct {
 }
 
 // Price is the pricing/stock block returned by the gpuTypes lowestPrice
-// query. Both prices are aggregate whole-pod prices for the GPU count supplied
+// query. Both prices are aggregate whole-pod rates for the GPU count supplied
 // to that query. RunPod removed interruptablePrice and cudaVersion from
-// LowestPrice; MinimumBidPrice is the only spot signal still exposed.
+// LowestPrice; the minimum bid is the only spot signal still exposed.
 type Price struct {
-	MinimumBidPrice      float64 `json:"minimumBidPrice"`
-	UninterruptablePrice float64 `json:"uninterruptablePrice"`
-	StockStatus          string  `json:"stockStatus,omitempty"`
+	MinimumBidPriceUSDMicrosPerHour USDMicrosPerHour `json:"-"`
+	OnDemandPriceUSDMicrosPerHour   USDMicrosPerHour `json:"-"`
+	StockStatus                     string           `json:"stockStatus,omitempty"`
 	// AvailableGPUCounts is the set of whole-pod GPU counts RunPod currently
 	// reports as rentable for this exact lowest-price query.
 	AvailableGPUCounts []int `json:"availableGpuCounts,omitempty"`
+}
+
+func (p *Price) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		MinimumBidPrice      *USDMicrosPerHour `json:"minimumBidPrice"`
+		UninterruptablePrice *USDMicrosPerHour `json:"uninterruptablePrice"`
+		StockStatus          string            `json:"stockStatus,omitempty"`
+		AvailableGPUCounts   []int             `json:"availableGpuCounts,omitempty"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if wire.MinimumBidPrice == nil || wire.UninterruptablePrice == nil {
+		return fmt.Errorf("RunPod lowestPrice omitted an hourly price")
+	}
+	*p = Price{
+		MinimumBidPriceUSDMicrosPerHour: *wire.MinimumBidPrice,
+		OnDemandPriceUSDMicrosPerHour:   *wire.UninterruptablePrice,
+		StockStatus:                     wire.StockStatus,
+		AvailableGPUCounts:              wire.AvailableGPUCounts,
+	}
+	return nil
+}
+
+func (p Price) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		MinimumBidPrice      USDMicrosPerHour `json:"minimumBidPrice"`
+		UninterruptablePrice USDMicrosPerHour `json:"uninterruptablePrice"`
+		StockStatus          string           `json:"stockStatus,omitempty"`
+		AvailableGPUCounts   []int            `json:"availableGpuCounts,omitempty"`
+	}{
+		MinimumBidPrice:      p.MinimumBidPriceUSDMicrosPerHour,
+		UninterruptablePrice: p.OnDemandPriceUSDMicrosPerHour,
+		StockStatus:          p.StockStatus,
+		AvailableGPUCounts:   p.AvailableGPUCounts,
+	})
 }
 
 // GPUTypeFilter constrains ListGPUTypes.

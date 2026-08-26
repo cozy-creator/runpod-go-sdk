@@ -79,7 +79,7 @@ func TestGPUOffersLive(t *testing.T) {
 	}
 	for _, o := range offers[:min(len(offers), 5)] {
 		t.Logf("offer %s cloud=%s stock=%s ondemand=$%.3f minbid=$%.3f",
-			o.GPUTypeID, o.CloudType, o.StockStatus, o.OnDemandPrice, o.MinimumBidPrice)
+			o.GPUTypeID, o.CloudType, o.StockStatus, o.OnDemandPriceUSDMicrosPerHour, o.MinimumBidPriceUSDMicrosPerHour)
 	}
 }
 
@@ -101,13 +101,13 @@ func TestSpotPodReclaimLive(t *testing.T) {
 	offer := offers[0] // cheapest in stock
 
 	pod, err := client.CreateSpotPod(ctx, &runpod.CreatePodRequest{
-		Name:              "sdk-live-spot-test",
-		ImageName:         "runpod/base:0.6.2-cuda12.4.1",
-		GPUTypeIDs:        []string{offer.GPUTypeID},
-		GPUCount:          1,
-		ContainerDiskInGB: 10,
-		CloudType:         offer.CloudType,
-		BidPerGPU:         offer.MinimumBidPrice,
+		Name:                      "sdk-live-spot-test",
+		ImageName:                 "runpod/base:0.6.2-cuda12.4.1",
+		GPUTypeIDs:                []string{offer.GPUTypeID},
+		GPUCount:                  1,
+		ContainerDiskInGB:         10,
+		CloudType:                 offer.CloudType,
+		BidPerGPUUSDMicrosPerHour: offer.MinimumBidPriceUSDMicrosPerHour,
 	})
 	if err != nil {
 		t.Fatalf("CreateSpotPod: %v", err)
@@ -117,7 +117,7 @@ func TestSpotPodReclaimLive(t *testing.T) {
 			t.Errorf("cleanup TerminatePod: %v", err)
 		}
 	}()
-	t.Logf("spot pod %s created on %s bid=$%.3f", pod.ID, offer.GPUTypeID, offer.MinimumBidPrice)
+	t.Logf("spot pod %s created on %s bid=%d USD micros/hour", pod.ID, offer.GPUTypeID, offer.MinimumBidPriceUSDMicrosPerHour)
 
 	got, err := client.GetPod(ctx, pod.ID)
 	if err != nil {

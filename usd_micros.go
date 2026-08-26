@@ -5,12 +5,42 @@ import (
 	"fmt"
 	"math/big"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
 const usdMicrosPerUSD int64 = 1_000_000
 
 var jsonDecimalPattern = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$`)
+
+// USDMicrosPerHour is an exact hourly USD rate. Its JSON representation is
+// RunPod's dollar decimal, never the integer micros held by Go callers.
+type USDMicrosPerHour int64
+
+func (r *USDMicrosPerHour) UnmarshalJSON(raw []byte) error {
+	micros, err := parseJSONUSDMicros(raw)
+	if err != nil {
+		return err
+	}
+	if micros < 0 {
+		return fmt.Errorf("USD rate cannot be negative")
+	}
+	*r = USDMicrosPerHour(micros)
+	return nil
+}
+
+func (r USDMicrosPerHour) MarshalJSON() ([]byte, error) {
+	micros := int64(r)
+	if micros < 0 {
+		return nil, fmt.Errorf("USD rate cannot be negative")
+	}
+	whole, fraction := micros/usdMicrosPerUSD, micros%usdMicrosPerUSD
+	if fraction == 0 {
+		return []byte(strconv.FormatInt(whole, 10)), nil
+	}
+	return []byte(strconv.FormatInt(whole, 10) + "." +
+		strings.TrimRight(fmt.Sprintf("%06d", fraction), "0")), nil
+}
 
 // parseJSONUSDMicros accepts the two exact currency representations RunPod
 // returns: a JSON number or a quoted JSON decimal. Null remains absence.

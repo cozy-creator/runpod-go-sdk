@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -35,7 +36,7 @@ func TestListGPUOffers(t *testing.T) {
 		_, _ = w.Write([]byte(`{"data":{"gpuTypes":[
 			{"id":"gpu-both","displayName":"Both","memoryInGb":24,"secureCloud":true,"communityCloud":true,
 			 "secure":{"minimumBidPrice":0.2,"uninterruptablePrice":0.6,"stockStatus":"High"},
-			 "community":{"minimumBidPrice":0.1,"uninterruptablePrice":0.4,"stockStatus":"Low"}},
+			 "community":{"minimumBidPrice":"0.1","uninterruptablePrice":"0.4","stockStatus":"Low"}},
 			{"id":"gpu-secure-only","displayName":"SecureOnly","memoryInGb":80,"secureCloud":true,"communityCloud":false,
 			 "secure":{"minimumBidPrice":1.0,"uninterruptablePrice":2.0,"stockStatus":"High"},
 			 "community":null},
@@ -59,13 +60,13 @@ func TestListGPUOffers(t *testing.T) {
 	if len(offers) != 3 {
 		t.Fatalf("expected 3 offers, got %d: %+v", len(offers), offers)
 	}
-	if offers[0].GPUTypeID != "gpu-both" || offers[0].CloudType != "COMMUNITY" || offers[0].OnDemandPrice != 0.4 {
+	if offers[0].GPUTypeID != "gpu-both" || offers[0].CloudType != "COMMUNITY" || offers[0].OnDemandPriceUSDMicrosPerHour != 400_000 {
 		t.Errorf("cheapest offer wrong: %+v", offers[0])
 	}
 	if offers[1].CloudType != "SECURE" || offers[1].GPUTypeID != "gpu-both" {
 		t.Errorf("second offer wrong: %+v", offers[1])
 	}
-	if offers[2].GPUTypeID != "gpu-secure-only" || offers[2].MinimumBidPrice != 1.0 {
+	if offers[2].GPUTypeID != "gpu-secure-only" || offers[2].MinimumBidPriceUSDMicrosPerHour != 1_000_000 {
 		t.Errorf("third offer wrong: %+v", offers[2])
 	}
 	for _, offer := range offers {
@@ -84,40 +85,62 @@ func TestListGPUOffersRejectsInvalidShape(t *testing.T) {
 	}
 }
 
+func TestListGPUOffersRefusesInexactOrMissingPrices(t *testing.T) {
+	for name, price := range map[string]string{
+		"missing minimum": `{"uninterruptablePrice":0.4,"stockStatus":"High"}`,
+		"sub-micro":       `{"minimumBidPrice":0.0000001,"uninterruptablePrice":0.4,"stockStatus":"High"}`,
+		"overflow":        `{"minimumBidPrice":0.1,"uninterruptablePrice":"9223372036854.775808","stockStatus":"High"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				fmt.Fprintf(w, `{"data":{"gpuTypes":[{"id":"gpu","secureCloud":true,"secure":%s}]}}`, price)
+			}))
+			defer server.Close()
+			client := mustClient(t, "test_key", runpod.WithGraphQLBaseURL(server.URL))
+			if _, err := client.ListGPUOffers(t.Context(), nil); err == nil {
+				t.Fatal("purchase-authority price must refuse")
+			}
+		})
+	}
+}
+
 func TestBidPerGPUValidation(t *testing.T) {
 	client := mustClient(t, "test_key")
 	ctx := context.Background()
 
 	req := &runpod.CreatePodRequest{
-		Name:              "n",
-		ImageName:         "img",
-		GPUTypeIDs:        []string{"A"},
-		GPUCount:          1,
-		ContainerDiskInGB: 10,
-		BidPerGPU:         0.25,
+		Name:                      "n",
+		ImageName:                 "img",
+		GPUTypeIDs:                []string{"A"},
+		GPUCount:                  1,
+		ContainerDiskInGB:         10,
+		BidPerGPUUSDMicrosPerHour: 250_000,
 	}
 	if _, err := client.CreatePod(ctx, req); err == nil {
-		t.Fatal("BidPerGPU without Interruptible must fail validation")
+		t.Fatal("BidPerGPUUSDMicrosPerHour without Interruptible must fail validation")
 	}
 
-	req.BidPerGPU = -1
+	req.BidPerGPUUSDMicrosPerHour = -1
 	req.Interruptible = true
 	if _, err := client.CreatePod(ctx, req); err == nil {
-		t.Fatal("negative BidPerGPU must fail validation")
+		t.Fatal("negative BidPerGPUUSDMicrosPerHour must fail validation")
 	}
 }
 
 func TestCreateSpotPodSendsBid(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]interface{}
+		var body struct {
+			Interruptible bool            `json:"interruptible"`
+			BidPerGPU     json.RawMessage `json:"bidPerGpu"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if body["interruptible"] != true {
+		if !body.Interruptible {
 			t.Fatalf("interruptible not set: %v", body)
 		}
-		if body["bidPerGpu"] != 0.25 {
-			t.Fatalf("bidPerGpu not marshalled: %v", body)
+		if string(body.BidPerGPU) != "0.25" {
+			t.Fatalf("bidPerGpu = %s, want exact 0.25 JSON decimal", body.BidPerGPU)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"pod-spot","interruptible":true}`))
@@ -126,12 +149,12 @@ func TestCreateSpotPodSendsBid(t *testing.T) {
 
 	client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL))
 	pod, err := client.CreateSpotPod(context.Background(), &runpod.CreatePodRequest{
-		Name:              "n",
-		ImageName:         "img",
-		GPUTypeIDs:        []string{"A"},
-		GPUCount:          1,
-		ContainerDiskInGB: 10,
-		BidPerGPU:         0.25,
+		Name:                      "n",
+		ImageName:                 "img",
+		GPUTypeIDs:                []string{"A"},
+		GPUCount:                  1,
+		ContainerDiskInGB:         10,
+		BidPerGPUUSDMicrosPerHour: 250_000,
 	})
 	if err != nil {
 		t.Fatalf("CreateSpotPod: %v", err)
