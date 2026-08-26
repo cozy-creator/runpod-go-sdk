@@ -124,12 +124,12 @@ func TestGetPodGPUCountNormalization(t *testing.T) {
 
 func TestListPodsNormalizesNestedGPUCountInBothWireShapes(t *testing.T) {
 	tests := []struct {
-		name        string
-		body        string
-		costPresent bool
+		name string
+		body string
+		cost string
 	}{
 		{name: "legacy wrapper compatibility", body: `{"pods":[{"id":"pod-1","gpu":{"count":2}}]}`},
-		{name: "documented bare array with explicit zero price", body: `[{"id":"pod-1","gpu":{"count":2},"costPerHr":0}]`, costPresent: true},
+		{name: "documented bare array with exact price", body: `[{"id":"pod-1","gpu":{"count":2},"costPerHr":0.123456}]`, cost: "0.123456"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -150,8 +150,12 @@ func TestListPodsNormalizesNestedGPUCountInBothWireShapes(t *testing.T) {
 			if len(pods) != 1 || pods[0].GPUCount != 2 {
 				t.Fatalf("normalized pods = %+v, want one pod with count 2", pods)
 			}
-			if pods[0].CostPerHourPresent != test.costPresent {
-				t.Fatalf("CostPerHourPresent = %t, want %t for %s", pods[0].CostPerHourPresent, test.costPresent, test.body)
+			if test.cost == "" {
+				if pods[0].CostPerHourUSD != nil {
+					t.Fatalf("CostPerHourUSD = %q, want nil for %s", pods[0].CostPerHourUSD, test.body)
+				}
+			} else if pods[0].CostPerHourUSD == nil || pods[0].CostPerHourUSD.String() != test.cost {
+				t.Fatalf("CostPerHourUSD = %v, want %s for %s", pods[0].CostPerHourUSD, test.cost, test.body)
 			}
 		})
 	}
