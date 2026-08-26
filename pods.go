@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"sort"
+	"strconv"
 	"strings"
 )
+
+const podNameLookupPageSize = 100
 
 // CreatePod creates a new RunPod instance.
 //
@@ -24,14 +28,55 @@ func (c *Client) CreatePod(ctx context.Context, req *CreatePodRequest) (*Pod, er
 
 // createPod performs a single POST /pods with no fan-out.
 func (c *Client) createPod(ctx context.Context, req *CreatePodRequest) (*Pod, error) {
+	prepared, err := c.PrepareCreatePod(req)
+	if err != nil {
+		return nil, err
+	}
+	return c.ExecuteCreatePod(ctx, prepared)
+}
+
+// PrepareCreatePod validates a single provider create and returns the exact
+// JSON bytes to record before making the call. A GPU request must name exactly
+// one type: fallback attempts are separate purchase obligations and must each
+// be prepared and recorded separately.
+func (c *Client) PrepareCreatePod(req *CreatePodRequest) ([]byte, error) {
 	if err := c.validateCreatePodRequest(req); err != nil {
 		return nil, err
 	}
+	if !strings.EqualFold(strings.TrimSpace(req.ComputeType), "CPU") && len(req.GPUTypeIDs) != 1 {
+		return nil, NewValidationError("gpuTypeIds", "must contain exactly one type for a prepared create")
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("prepare pod create: %w", err)
+	}
+	return body, nil
+}
+
+// ExecuteCreatePod sends a body returned by PrepareCreatePod without
+// re-marshaling it. The bytes are validated again so corrupt or incompatible
+// durable records are refused before the wire; validation never changes the
+// bytes sent.
+func (c *Client) ExecuteCreatePod(ctx context.Context, prepared []byte) (*Pod, error) {
+	if len(prepared) == 0 {
+		return nil, NewValidationError("prepared", "cannot be empty")
+	}
+	body := append([]byte(nil), prepared...)
+	var req CreatePodRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, NewValidationError("prepared", "must be a valid pod-create JSON object")
+	}
+	if err := c.validateCreatePodRequest(&req); err != nil {
+		return nil, err
+	}
+	if !strings.EqualFold(strings.TrimSpace(req.ComputeType), "CPU") && len(req.GPUTypeIDs) != 1 {
+		return nil, NewValidationError("gpuTypeIds", "must contain exactly one type for a prepared create")
+	}
 
 	var pod Pod
-	err := c.Post(ctx, "/pods", req, &pod)
+	err := c.postBytes(ctx, "/pods", body, &pod)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create pod: %w", classifyCreatePodError(err, req))
+		return nil, fmt.Errorf("failed to create pod: %w", classifyCreatePodError(err, &req))
 	}
 
 	pod.normalize()
@@ -104,7 +149,62 @@ func (c *Client) GetPodWithOptions(ctx context.Context, podID string, opts *GetP
 
 // ListPods lists all pods with optional filtering
 func (c *Client) ListPods(ctx context.Context, opts *ListOptions) ([]*Pod, error) {
-	endpoint := c.buildListURL("/pods", opts)
+	return c.listPods(ctx, c.buildListURL("/pods", opts))
+}
+
+// FindPodsByName returns every exact provider-side match for name. RunPod pod
+// names are not unique, so this method deliberately returns all records and
+// makes no adoption, health, or readiness decision for the caller.
+//
+// The lookup walks the provider's offset pagination and refuses a page that
+// adds no new pod IDs; silently looping or treating an incomplete lookup as
+// absence could lead a recovery path to buy a duplicate pod.
+func (c *Client) FindPodsByName(ctx context.Context, name string) ([]*Pod, error) {
+	if strings.TrimSpace(name) == "" {
+		return nil, NewValidationError("name", "cannot be empty")
+	}
+
+	seen := make(map[string]struct{})
+	var matches []*Pod
+	for offset := 0; ; {
+		endpoint := c.buildURLWithParams("/pods", map[string]string{
+			"name":   name,
+			"limit":  strconv.Itoa(podNameLookupPageSize),
+			"offset": strconv.Itoa(offset),
+		})
+		page, err := c.listPods(ctx, endpoint)
+		if err != nil {
+			return nil, fmt.Errorf("find pods by name %q: %w", name, err)
+		}
+		if len(page) == 0 {
+			break
+		}
+
+		advanced := false
+		for _, pod := range page {
+			if pod == nil || strings.TrimSpace(pod.ID) == "" {
+				return nil, fmt.Errorf("find pods by name %q: provider response omitted a pod id", name)
+			}
+			if _, ok := seen[pod.ID]; ok {
+				continue
+			}
+			seen[pod.ID] = struct{}{}
+			advanced = true
+			if pod.Name == name {
+				matches = append(matches, pod)
+			}
+		}
+		if !advanced {
+			return nil, fmt.Errorf("find pods by name %q: pagination did not advance at offset %d", name, offset)
+		}
+		offset += len(page)
+	}
+
+	sort.Slice(matches, func(i, j int) bool { return matches[i].ID < matches[j].ID })
+	return matches, nil
+}
+
+func (c *Client) listPods(ctx context.Context, endpoint string) ([]*Pod, error) {
 
 	// RunPod has returned multiple shapes for this endpoint over time:
 	// - [...] (current documented shape)

@@ -101,29 +101,33 @@ type Pod struct {
 	// `imageName` on POST/GET/LIST responses (verified th#648) even though
 	// the published OpenAPI schema names it `image` — accept both via
 	// ImageAlt + normalizePod.
-	ImageName         string            `json:"imageName"`
-	ImageAlt          string            `json:"image,omitempty"`
-	GPUCount          int               `json:"gpuCount"`
-	GPU               *PodGPU           `json:"gpu,omitempty"`
-	VCPUCount         int               `json:"vcpuCount"`
-	MemoryInGB        int               `json:"memoryInGb"`
-	ContainerDiskInGB int               `json:"containerDiskInGb"`
-	VolumeInGB        int               `json:"volumeInGb"`
-	VolumeMountPath   string            `json:"volumeMountPath"`
-	CostPerHour       float64           `json:"costPerHr"`
-	MachineID         string            `json:"machineId"`
-	CreatedAt         *JSONTime         `json:"createdAt"`
-	Env               map[string]string `json:"env"`
-	Ports             []string          `json:"ports"`
-	LastStartedAt     *JSONTime         `json:"lastStartedAt"`
-	AdjustedCostPerHr float64           `json:"adjustedCostPerHr"`
-	Locked            bool              `json:"locked"`
-	Interruptible     bool              `json:"interruptible"`
-	PublicIP          string            `json:"publicIp,omitempty"`
-	Runtime           *PodRuntime       `json:"runtime,omitempty"`
-	Machine           *Machine          `json:"machine,omitempty"`
-	NetworkVolume     *NetworkVolume    `json:"networkVolume,omitempty"`
-	NetworkVolumeID   string            `json:"networkVolumeId,omitempty"`
+	ImageName         string  `json:"imageName"`
+	ImageAlt          string  `json:"image,omitempty"`
+	GPUCount          int     `json:"gpuCount"`
+	GPU               *PodGPU `json:"gpu,omitempty"`
+	VCPUCount         int     `json:"vcpuCount"`
+	MemoryInGB        int     `json:"memoryInGb"`
+	ContainerDiskInGB int     `json:"containerDiskInGb"`
+	VolumeInGB        int     `json:"volumeInGb"`
+	VolumeMountPath   string  `json:"volumeMountPath"`
+	CostPerHour       float64 `json:"costPerHr"`
+	// CostPerHourPresent distinguishes an explicit costPerHr (including zero)
+	// from an omitted/null provider field. Callers making money decisions must
+	// not infer that an absent price is free.
+	CostPerHourPresent bool              `json:"-"`
+	MachineID          string            `json:"machineId"`
+	CreatedAt          *JSONTime         `json:"createdAt"`
+	Env                map[string]string `json:"env"`
+	Ports              []string          `json:"ports"`
+	LastStartedAt      *JSONTime         `json:"lastStartedAt"`
+	AdjustedCostPerHr  float64           `json:"adjustedCostPerHr"`
+	Locked             bool              `json:"locked"`
+	Interruptible      bool              `json:"interruptible"`
+	PublicIP           string            `json:"publicIp,omitempty"`
+	Runtime            *PodRuntime       `json:"runtime,omitempty"`
+	Machine            *Machine          `json:"machine,omitempty"`
+	NetworkVolume      *NetworkVolume    `json:"networkVolume,omitempty"`
+	NetworkVolumeID    string            `json:"networkVolumeId,omitempty"`
 
 	// CPU-pod-specific response fields. RunPod's REST `POST /pods` returns
 	// `cpuFlavorId` (the family the instance was placed on, e.g. "cpu3c")
@@ -132,6 +136,24 @@ type Pod struct {
 	// as the sentinel "unknown" — callers should treat that as "no GPU"
 	// rather than as a real GPU type.
 	CPUFlavorID string `json:"cpuFlavorId,omitempty"`
+}
+
+// UnmarshalJSON preserves whether RunPod supplied costPerHr while retaining
+// CostPerHour's source-compatible float64 API.
+func (p *Pod) UnmarshalJSON(data []byte) error {
+	type podAlias Pod
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	var decoded podAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*p = Pod(decoded)
+	raw, ok := fields["costPerHr"]
+	p.CostPerHourPresent = ok && strings.TrimSpace(string(raw)) != "null"
+	return nil
 }
 
 // PodGPU is the allocated GPU shape embedded in current RunPod REST pod

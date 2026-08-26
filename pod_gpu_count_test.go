@@ -5,10 +5,53 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	runpod "github.com/cozy-creator/runpod-go-sdk"
 )
+
+func TestFindPodsByNamePagination(t *testing.T) {
+	t.Run("short page does not hide later matches", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Query().Get("offset") {
+			case "0":
+				_, _ = fmt.Fprint(w, `[{"id":"pod-a","name":"obligation-1"}]`)
+			case "1":
+				_, _ = fmt.Fprint(w, `[{"id":"pod-b","name":"obligation-1"}]`)
+			default:
+				_, _ = fmt.Fprint(w, `[]`)
+			}
+		}))
+		defer server.Close()
+
+		client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL))
+		pods, err := client.FindPodsByName(context.Background(), "obligation-1")
+		if err != nil || len(pods) != 2 {
+			t.Fatalf("FindPodsByName = %+v, %v; want both short-page matches", pods, err)
+		}
+	})
+
+	t.Run("non-progress is refused", func(t *testing.T) {
+		page := make([]string, 100)
+		for i := range page {
+			page[i] = fmt.Sprintf(`{"id":"pod-%03d","name":"obligation-1"}`, i)
+		}
+		body := "[" + strings.Join(page, ",") + "]"
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, body) // deliberately ignores offset
+		}))
+		defer server.Close()
+
+		client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL))
+		_, err := client.FindPodsByName(context.Background(), "obligation-1")
+		if err == nil || !strings.Contains(err.Error(), "pagination did not advance") {
+			t.Fatalf("non-progress error = %v", err)
+		}
+	})
+}
 
 func TestCreatePodNormalizesOfficialNestedGPUCount(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -81,11 +124,12 @@ func TestGetPodGPUCountNormalization(t *testing.T) {
 
 func TestListPodsNormalizesNestedGPUCountInBothWireShapes(t *testing.T) {
 	tests := []struct {
-		name string
-		body string
+		name        string
+		body        string
+		costPresent bool
 	}{
 		{name: "legacy wrapper compatibility", body: `{"pods":[{"id":"pod-1","gpu":{"count":2}}]}`},
-		{name: "documented bare array", body: `[{"id":"pod-1","gpu":{"count":2}}]`},
+		{name: "documented bare array with explicit zero price", body: `[{"id":"pod-1","gpu":{"count":2},"costPerHr":0}]`, costPresent: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -105,6 +149,9 @@ func TestListPodsNormalizesNestedGPUCountInBothWireShapes(t *testing.T) {
 			}
 			if len(pods) != 1 || pods[0].GPUCount != 2 {
 				t.Fatalf("normalized pods = %+v, want one pod with count 2", pods)
+			}
+			if pods[0].CostPerHourPresent != test.costPresent {
+				t.Fatalf("CostPerHourPresent = %t, want %t for %s", pods[0].CostPerHourPresent, test.costPresent, test.body)
 			}
 		})
 	}

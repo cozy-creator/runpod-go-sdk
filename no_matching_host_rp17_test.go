@@ -178,16 +178,11 @@ func TestNoPodCreatedVocabularyIsPinnedToObservedStrings(t *testing.T) {
 		}
 	}
 
-	// Entries with NO recorded provenance. They are not deleted — removing a
-	// classification on no evidence is as much a guess as adding one — but
-	// they are named here so the gap is visible and countable. Shrink this
-	// list by OBSERVING the string, never by assuming it.
+	// Entries with NO recorded provenance. Each remains semantically specific
+	// enough to prove capacity; broad phrases do not belong in this list.
 	//
-	//	"no resources"       — broad enough to match non-capacity prose;
-	//	                       no observed RunPod string is on record for it.
 	//	"not enough free gpus" — plausible for a multi-GPU ask, never recorded.
 	unpinned := map[string]bool{
-		"no resources":         true,
 		"not enough free gpus": true,
 	}
 
@@ -216,15 +211,10 @@ func TestNoPodCreatedVocabularyIsPinnedToObservedStrings(t *testing.T) {
 		"internal server error",
 		"create pod: timeout writing response",
 		"upstream connect error",
-		"user has no resources quota remaining", // why "no resources" is flagged above
+		"user has no resources quota remaining",
 	} {
-		if runpod.ClassifiesAsNoPodCreated(msg) == false {
-			continue
+		if runpod.ClassifiesAsNoPodCreated(msg) {
+			t.Fatalf("%q must stay ambiguous — downgrading it drops the accounting for a pod that may exist", msg)
 		}
-		if msg == "user has no resources quota remaining" {
-			t.Logf("KNOWN GAP (rp#17): the unpinned %q entry matches non-capacity prose: %q", "no resources", msg)
-			continue
-		}
-		t.Fatalf("%q must stay ambiguous — downgrading it drops the accounting for a pod that may exist", msg)
 	}
 }
