@@ -1,5 +1,5 @@
-owner: codex (th#1074 lane)
-purpose: discover RunPod REST PodCreateInput datacenter enum fail-closed
-branch: agent/1074-datacenter-enum
-base: 6cb64ff4c0b7bc6d8dada940382227162ee349db
-started: 2026-07-24
+owner: codex (/root/runpod_sdk_hardcut)
+purpose: crash-safe exact-byte pod purchase and honest provider readback
+branch: agent/runpod-sdk-hardcut
+base: ee6dacfd34922b5ecd97c5cb3d07bcb21ab22116
+started: 2026-08-26

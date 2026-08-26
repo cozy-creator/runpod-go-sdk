@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -257,6 +258,49 @@ func TestAccountIDRejectsMissingProviderIdentity(t *testing.T) {
 
 	if _, err := srv.MustClient().GetAccountID(context.Background()); err == nil {
 		t.Fatal("GetAccountID must reject a response without myself.id")
+	}
+}
+
+func TestClientBalancePreservesZeroAndRefusesAbsence(t *testing.T) {
+	srv := runpodtest.New()
+	defer srv.Close()
+	client := srv.MustClient()
+
+	zero := 0.0
+	srv.SetClientBalance(&zero)
+	got, err := client.GetClientBalance(context.Background())
+	if err != nil || got != 0 {
+		t.Fatalf("present zero balance = %v, %v; want 0, nil", got, err)
+	}
+
+	srv.SetClientBalance(nil)
+	if _, err := client.GetClientBalance(context.Background()); err == nil {
+		t.Fatal("omitted clientBalance must be refused, not decoded as zero")
+	}
+}
+
+func TestFindPodsByNameReturnsEveryExactMatch(t *testing.T) {
+	srv := runpodtest.New()
+	defer srv.Close()
+	for i := 0; i < 205; i++ {
+		name := "obligation-1"
+		if i == 17 {
+			name = "other"
+		}
+		srv.AddPod(&runpod.Pod{ID: fmt.Sprintf("pod-%03d", i), Name: name})
+	}
+
+	pods, err := srv.MustClient().FindPodsByName(context.Background(), "obligation-1")
+	if err != nil {
+		t.Fatalf("FindPodsByName: %v", err)
+	}
+	if len(pods) != 204 {
+		t.Fatalf("matches = %d, want 204 across all pages", len(pods))
+	}
+	for i := 1; i < len(pods); i++ {
+		if pods[i-1].ID >= pods[i].ID || pods[i].Name != "obligation-1" {
+			t.Fatalf("matches are not exact and ID-sorted at %d: %+v", i, pods[i])
+		}
 	}
 }
 

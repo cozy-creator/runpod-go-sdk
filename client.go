@@ -197,6 +197,13 @@ func (c *Client) makeRequest(ctx context.Context, method, endpoint string, body 
 			return nil, fmt.Errorf("failed to marshal request body: %w", err)
 		}
 	}
+	return c.makeRequestBytes(ctx, method, endpoint, jsonBody)
+}
+
+// makeRequestBytes is makeRequest's exact-byte path. It exists for operations
+// whose request body must be durably recorded before the provider call and then
+// sent without a second marshal.
+func (c *Client) makeRequestBytes(ctx context.Context, method, endpoint string, jsonBody []byte) (*http.Response, error) {
 
 	var lastErr error
 	var retryAfter time.Duration
@@ -211,7 +218,7 @@ func (c *Client) makeRequest(ctx context.Context, method, endpoint string, body 
 			retryAfter = 0
 		}
 
-		resp, err := c.doRequest(ctx, method, endpoint, jsonBody, body)
+		resp, err := c.doRequest(ctx, method, endpoint, jsonBody)
 		if err != nil {
 			lastErr = err
 
@@ -282,7 +289,7 @@ func parseRetryAfter(v string) time.Duration {
 }
 
 // doRequest performs a single HTTP request.
-func (c *Client) doRequest(ctx context.Context, method, endpoint string, jsonBody []byte, body interface{}) (*http.Response, error) {
+func (c *Client) doRequest(ctx context.Context, method, endpoint string, jsonBody []byte) (*http.Response, error) {
 	var buf io.Reader
 	if jsonBody != nil {
 		buf = bytes.NewReader(jsonBody)
@@ -299,9 +306,8 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, jsonBod
 
 	if c.debug {
 		c.logger.Printf("[DEBUG] %s %s", method, fullURL)
-		if body != nil {
-			bodyJSON, _ := json.MarshalIndent(body, "", "  ")
-			c.logger.Printf("[DEBUG] Request Body: %s", string(bodyJSON))
+		if jsonBody != nil {
+			c.logger.Printf("[DEBUG] Request Body: %s", string(jsonBody))
 		}
 	}
 
@@ -532,6 +538,15 @@ func (c *Client) Get(ctx context.Context, endpoint string, result interface{}) e
 // Post performs a POST request
 func (c *Client) Post(ctx context.Context, endpoint string, body interface{}, result interface{}) error {
 	resp, err := c.makeRequest(ctx, "POST", endpoint, body)
+	if err != nil {
+		return err
+	}
+	return c.handleResponse(resp, result)
+}
+
+// postBytes performs one POST with the supplied bytes unchanged.
+func (c *Client) postBytes(ctx context.Context, endpoint string, body []byte, result interface{}) error {
+	resp, err := c.makeRequestBytes(ctx, http.MethodPost, endpoint, body)
 	if err != nil {
 		return err
 	}

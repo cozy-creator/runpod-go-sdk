@@ -13,20 +13,12 @@ import (
 //
 // TestNoPodCreatedVocabularyIsPinnedToObservedStrings audits this list: each
 // entry is either pinned to a provider string somebody actually observed, or
-// declared unpinned there. Two entries are currently unpinned. An unmeasured
+// declared unpinned there. One entry is currently unpinned. An unmeasured
 // entry is how the vocabulary goes stale (rp#17).
 var noCapacityMessages = []string{
 	"no instances available",
 	"no instances currently available",
 	"no longer any instances available",
-	// NOTE: "no resources available" was deleted as strictly dead — the
-	// shorter "no resources" below already contains it, so it could never
-	// match anything the shorter entry did not. See rp#17 for the one entry
-	// in this list that is still unpinned ("no resources"): it is broad
-	// enough to match non-capacity prose and no observed string justifies
-	// it, but narrowing it without evidence would be a guess in the other
-	// direction.
-	"no resources",
 	"does not have the resources to deploy your pod",
 	"not enough free gpus",
 }
@@ -142,11 +134,10 @@ type CreatePodFallbackOptions struct {
 // multi-entry gpuTypeIds list when the first type has no stock — it returns
 // 500 "no instances available" — so the SDK owns the per-type fan-out.
 //
-// Capacity failures (and other 5xx responses) move on to the next candidate;
-// 4xx and transport failures abort immediately since retrying them on a
-// different GPU type cannot help. When every candidate fails the returned
-// error is *FallbackExhaustedError, which matches errors.Is(err,
-// ErrNoCapacity) when any attempt was a stock-out.
+// Only a typed, definitive ErrNoCapacity moves on to the next candidate. An
+// unclassified 5xx or transport failure is ambiguous — a pod may exist — and
+// aborts immediately so fallback cannot buy a duplicate. When every candidate
+// is definitively unavailable the returned error is *FallbackExhaustedError.
 //
 // candidates may be nil, in which case req.GPUTypeIDs is used.
 func (c *Client) CreatePodWithFallback(ctx context.Context, req *CreatePodRequest, candidates []string, opts *CreatePodFallbackOptions) (*Pod, error) {
@@ -182,11 +173,7 @@ func (c *Client) CreatePodWithFallback(ctx context.Context, req *CreatePodReques
 			opts.OnAttemptFailure(gpuTypeID, err)
 		}
 
-		// Abort on errors a different GPU type cannot fix: validation,
-		// auth, malformed requests, transport failures. Continue on 5xx
-		// (capacity or otherwise) — RunPod's stock-out wording varies.
-		var apiErr *APIError
-		if !errors.As(err, &apiErr) || !apiErr.IsServerError() {
+		if !errors.Is(err, ErrNoCapacity) {
 			return nil, err
 		}
 		attempts = append(attempts, FallbackAttempt{GPUTypeID: gpuTypeID, Err: err})

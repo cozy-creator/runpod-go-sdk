@@ -200,21 +200,21 @@ func TestFallback_LiveMachineResourcesWordingIsNoCapacity(t *testing.T) {
 	}
 }
 
-func TestFallback_PlainServerErrorNotCapacityButContinues(t *testing.T) {
+func TestFallback_PlainServerErrorIsAmbiguousAndAborts(t *testing.T) {
 	server, attempted := newFallbackServer(t,
 		map[string]int{"A": 502, "B": 0},
 		`{"error":"bad gateway"}`)
 	defer server.Close()
 
-	pod, err := fallbackClient(t, server.URL).CreatePod(context.Background(), baseGPURequest("A", "B"))
-	if err != nil {
-		t.Fatalf("5xx on first candidate should continue fan-out, got %v", err)
+	_, err := fallbackClient(t, server.URL).CreatePod(context.Background(), baseGPURequest("A", "B"))
+	if err == nil {
+		t.Fatal("unclassified 5xx must remain ambiguous")
 	}
-	if pod.ID != "pod-B" {
-		t.Fatalf("expected pod-B, got %q", pod.ID)
+	if errors.Is(err, runpod.ErrNoCapacity) {
+		t.Fatalf("plain 502 must not classify as definitive no-capacity: %v", err)
 	}
-	if got := attempted(); len(got) != 2 {
-		t.Fatalf("expected 2 attempts, got %v", got)
+	if got := attempted(); len(got) != 1 || got[0] != "A" {
+		t.Fatalf("ambiguous create must abort before candidate B, attempts=%v", got)
 	}
 }
 

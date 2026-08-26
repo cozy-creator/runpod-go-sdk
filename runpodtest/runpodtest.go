@@ -20,6 +20,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -42,18 +44,19 @@ type fault struct {
 type Server struct {
 	httpServer *httptest.Server
 
-	mu        sync.Mutex
-	nextID    int
-	pods      map[string]*runpod.Pod
-	volumes   map[string]*runpod.NetworkVolume
-	auths     map[string]*runpod.ContainerRegistryAuth
-	jobs      map[string]*fakeJob // key: endpointID + "/" + jobID
-	stockOut  map[string]bool     // GPU type ID -> out of stock
-	gpuTypes  []runpod.GPUType
-	lifecycle map[string]*runpod.PodLifecycleObservation
-	accountID string
-	authz     []string
-	faults    []fault // queued one-shot injected responses
+	mu            sync.Mutex
+	nextID        int
+	pods          map[string]*runpod.Pod
+	volumes       map[string]*runpod.NetworkVolume
+	auths         map[string]*runpod.ContainerRegistryAuth
+	jobs          map[string]*fakeJob // key: endpointID + "/" + jobID
+	stockOut      map[string]bool     // GPU type ID -> out of stock
+	gpuTypes      []runpod.GPUType
+	lifecycle     map[string]*runpod.PodLifecycleObservation
+	accountID     string
+	clientBalance *float64
+	authz         []string
+	faults        []fault // queued one-shot injected responses
 }
 
 type fakeJob struct {
@@ -67,14 +70,16 @@ type fakeJob struct {
 
 // New starts a fake RunPod server. Call Close when done.
 func New() *Server {
+	clientBalance := 100.0
 	s := &Server{
-		pods:      map[string]*runpod.Pod{},
-		volumes:   map[string]*runpod.NetworkVolume{},
-		auths:     map[string]*runpod.ContainerRegistryAuth{},
-		jobs:      map[string]*fakeJob{},
-		stockOut:  map[string]bool{},
-		lifecycle: map[string]*runpod.PodLifecycleObservation{},
-		accountID: "runpodtest-account",
+		pods:          map[string]*runpod.Pod{},
+		volumes:       map[string]*runpod.NetworkVolume{},
+		auths:         map[string]*runpod.ContainerRegistryAuth{},
+		jobs:          map[string]*fakeJob{},
+		stockOut:      map[string]bool{},
+		lifecycle:     map[string]*runpod.PodLifecycleObservation{},
+		accountID:     "runpodtest-account",
+		clientBalance: &clientBalance,
 	}
 	// Default GPU catalog for gpuTypes queries; override with SetGPUTypes.
 	for _, spec := range runpod.GPUCatalog() {
@@ -160,6 +165,19 @@ func (s *Server) SetAccountID(accountID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.accountID = accountID
+}
+
+// SetClientBalance changes the GraphQL clientBalance response. Pass nil to
+// exercise an omitted/null provider balance.
+func (s *Server) SetClientBalance(balance *float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if balance == nil {
+		s.clientBalance = nil
+		return
+	}
+	copy := *balance
+	s.clientBalance = &copy
 }
 
 // AuthorizationHeaders returns the credentials observed by the fake in
@@ -378,9 +396,22 @@ func (s *Server) handlePods(w http.ResponseWriter, r *http.Request, path string)
 		s.mu.Lock()
 		pods := make([]*runpod.Pod, 0, len(s.pods))
 		for _, p := range s.pods {
+			if name := r.URL.Query().Get("name"); name != "" && p.Name != name {
+				continue
+			}
 			pods = append(pods, p)
 		}
 		s.mu.Unlock()
+		sort.Slice(pods, func(i, j int) bool { return pods[i].ID < pods[j].ID })
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		if offset > len(pods) {
+			offset = len(pods)
+		}
+		pods = pods[offset:]
+		if limit > 0 && len(pods) > limit {
+			pods = pods[:limit]
+		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{"pods": pods})
 
 	case len(parts) >= 2:
@@ -662,10 +693,19 @@ func (s *Server) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	if strings.Contains(req.Query, "myself") {
 		s.mu.Lock()
 		accountID := s.accountID
+		var clientBalance *float64
+		if s.clientBalance != nil {
+			copy := *s.clientBalance
+			clientBalance = &copy
+		}
 		s.mu.Unlock()
+		myself := map[string]interface{}{"id": accountID}
+		if clientBalance != nil {
+			myself["clientBalance"] = *clientBalance
+		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"data": map[string]interface{}{
-				"myself": map[string]string{"id": accountID},
+				"myself": myself,
 			},
 		})
 		return

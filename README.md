@@ -49,12 +49,14 @@ Retries: GETs and other idempotent requests retry on 5xx/429 with exponential ba
 | Function | Description |
 |----------|-------------|
 | `CreatePod` | Create a pod. With multiple `GPUTypeIDs`, fans out per type (see below) |
+| `PrepareCreatePod` / `ExecuteCreatePod` | Record one exact create body before sending those same bytes |
 | `CreatePodWithFallback` | Explicit per-GPU-type fan-out with filter/failure hooks |
 | `CreateSpotPod` | Create an interruptible (spot) pod |
 | `GetPod` / `GetPodWithOptions` | Fetch a pod (optional `includeMachine`, `includeNetworkVolume`, ...) |
 | `GetPodLifecycleObservation` | Read desired state, start generation, and latest provider telemetry through GraphQL |
 | `GetPodTerminalError` | Classify REST terminal states or fresh current-generation `exited` telemetry |
 | `ListPods` | List pods with pagination |
+| `FindPodsByName` | Return every exact name match; makes no adoption/readiness inference |
 | `StopPod` / `ResumePod` / `TerminatePod` | Lifecycle |
 | `WaitForPodReady` | Poll until runtime is up; returns startup-timing decomposition |
 | `PodTimingSnapshot` | One-shot timing decomposition |
@@ -76,7 +78,17 @@ if errors.Is(err, runpod.ErrNoCapacity) {
 }
 ```
 
-`CreatePodWithFallback` adds a `CandidateFilter` (skip recently-failed types) and an `OnAttemptFailure` hook for consumer-side failure tracking.
+`CreatePodWithFallback` adds a `CandidateFilter` (skip recently-failed types) and an `OnAttemptFailure` hook for consumer-side failure tracking. It advances only after a typed `ErrNoCapacity`; transport failures and unclassified 5xx responses abort because the create outcome is ambiguous.
+
+For crash-safe purchase bookkeeping, prepare and durably record one candidate's exact body before executing it:
+
+```go
+body, err := client.PrepareCreatePod(req) // exactly one GPU type
+// Persist body and the purchase obligation here.
+pod, err := client.ExecuteCreatePod(ctx, body) // sends body unchanged
+```
+
+`FindPodsByName` supports ambiguous-create readback. Names are not unique, so it returns every exact match and leaves adoption, health, and product-readiness decisions to the caller.
 
 ### Pod logs
 
@@ -200,6 +212,8 @@ case errors.Is(err, runpod.ErrRateLimited):
 case errors.Is(err, runpod.ErrNoCapacity):
 }
 ```
+
+`GetClientBalance` returns a present provider balance, including a real zero, and refuses omitted/null balance data.
 
 ## Testing
 

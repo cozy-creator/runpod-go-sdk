@@ -1,14 +1,49 @@
 package runpod_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	runpod "github.com/cozy-creator/runpod-go-sdk"
 )
+
+func TestExecuteCreatePodSendsPreparedBytesUnchanged(t *testing.T) {
+	var received []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		received, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"pod-1","desiredStatus":"RUNNING"}`))
+	}))
+	defer server.Close()
+
+	client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL))
+	prepared, err := client.PrepareCreatePod(&runpod.CreatePodRequest{
+		Name: "obligation-1", ImageName: "img", GPUTypeIDs: []string{"NVIDIA H200"},
+		GPUCount: 1, ContainerDiskInGB: 100,
+	})
+	if err != nil {
+		t.Fatalf("PrepareCreatePod: %v", err)
+	}
+
+	// Whitespace is semantically irrelevant JSON but byte-significant durable
+	// intent. If ExecuteCreatePod re-marshals, this exact comparison goes red.
+	prepared = append(append([]byte("\n  "), prepared...), '\n')
+	if _, err := client.ExecuteCreatePod(context.Background(), prepared); err != nil {
+		t.Fatalf("ExecuteCreatePod: %v", err)
+	}
+	if !bytes.Equal(received, prepared) {
+		t.Fatalf("provider received %q, want exact prepared bytes %q", received, prepared)
+	}
+}
 
 func TestCreatePodGPUResourceMinimaWireFormat(t *testing.T) {
 	requestNumber := 0
