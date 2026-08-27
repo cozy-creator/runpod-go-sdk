@@ -1,7 +1,10 @@
 package runpod
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -69,14 +72,33 @@ type GPUOfferFilter struct {
 
 type graphQLGPUOfferPayload struct {
 	GPUTypes []struct {
-		ID             string `json:"id"`
-		DisplayName    string `json:"displayName"`
-		MemoryInGB     int    `json:"memoryInGb"`
-		SecureCloud    bool   `json:"secureCloud"`
-		CommunityCloud bool   `json:"communityCloud"`
-		Secure         *Price `json:"secure"`
-		Community      *Price `json:"community"`
+		ID             string          `json:"id"`
+		DisplayName    string          `json:"displayName"`
+		MemoryInGB     int             `json:"memoryInGb"`
+		SecureCloud    bool            `json:"secureCloud"`
+		CommunityCloud bool            `json:"communityCloud"`
+		Secure         json.RawMessage `json:"secure"`
+		Community      json.RawMessage `json:"community"`
 	} `json:"gpuTypes"`
+}
+
+// offerPrice keeps one provider cloud arm with an unavailable on-demand price from
+// erasing every other purchasable offer in the snapshot. Missing price means
+// this cloud arm is not an on-demand offer; malformed or inexact money still
+// refuses the whole observation.
+func offerPrice(raw json.RawMessage) (*Price, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return nil, nil
+	}
+	var price Price
+	if err := json.Unmarshal(raw, &price); err != nil {
+		if errors.Is(err, errOnDemandPriceUnavailable) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &price, nil
 }
 
 // ListGPUOffers returns per-(GPU type x cloud) stock and pricing in one
@@ -162,6 +184,14 @@ query($gpuCount: Int!, $minCudaVersion: String, $allowedCudaVersions: [String], 
 				continue
 			}
 		}
+		secure, err := offerPrice(gpu.Secure)
+		if err != nil {
+			return nil, fmt.Errorf("decode %s SECURE offer: %w", gpu.ID, err)
+		}
+		community, err := offerPrice(gpu.Community)
+		if err != nil {
+			return nil, fmt.Errorf("decode %s COMMUNITY offer: %w", gpu.ID, err)
+		}
 		add := func(cloud string, price *Price) {
 			if price == nil {
 				return
@@ -183,10 +213,10 @@ query($gpuCount: Int!, $minCudaVersion: String, $allowedCudaVersions: [String], 
 			})
 		}
 		if gpu.SecureCloud {
-			add("SECURE", gpu.Secure)
+			add("SECURE", secure)
 		}
 		if gpu.CommunityCloud {
-			add("COMMUNITY", gpu.Community)
+			add("COMMUNITY", community)
 		}
 	}
 

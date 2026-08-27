@@ -2,6 +2,7 @@ package runpod
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -345,6 +346,8 @@ type Price struct {
 	AvailableGPUCounts []int `json:"availableGpuCounts,omitempty"`
 }
 
+var errOnDemandPriceUnavailable = errors.New("RunPod lowestPrice omitted its on-demand hourly price")
+
 func (p *Price) UnmarshalJSON(data []byte) error {
 	var wire struct {
 		MinimumBidPrice      *USDMicrosPerHour `json:"minimumBidPrice"`
@@ -356,7 +359,7 @@ func (p *Price) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	if wire.UninterruptablePrice == nil {
-		return fmt.Errorf("RunPod lowestPrice omitted its on-demand hourly price")
+		return errOnDemandPriceUnavailable
 	}
 	*p = Price{
 		MinimumBidPriceUSDMicrosPerHour: wire.MinimumBidPrice,
