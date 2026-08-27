@@ -2,6 +2,7 @@ package runpod_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -130,23 +131,32 @@ func TestGetPodBillingHistoryValidatesExactPodAndUTCBoundsBeforeHTTP(t *testing.
 
 func TestGetPodBillingHistoryRefusesAmbiguousEvidence(t *testing.T) {
 	const podID = "pod-one"
+	start := time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)
+	wantQuery := url.Values{
+		"bucketSize": {"hour"},
+		"endTime":    {start.Add(time.Hour).Format(time.RFC3339Nano)},
+		"grouping":   {"podId"},
+		"podId":      {podID},
+		"startTime":  {start.Format(time.RFC3339Nano)},
+	}.Encode()
 	tests := []struct {
-		name string
-		body string
-		want string
+		name     string
+		body     string
+		want     string
+		wantKind string
 	}{
-		{name: "top level null", body: `null`, want: "JSON array"},
-		{name: "missing amount", body: `[ {"podId":"pod-one","time":"2026-08-25T10:00:00Z","timeBilledMs":1} ]`, want: "omitted amount"},
-		{name: "missing pod", body: `[ {"amount":1,"time":"2026-08-25T10:00:00Z","timeBilledMs":1} ]`, want: "omitted podId"},
-		{name: "missing time", body: `[ {"amount":1,"podId":"pod-one","timeBilledMs":1} ]`, want: "omitted time"},
-		{name: "missing billed time", body: `[ {"amount":1,"podId":"pod-one","time":"2026-08-25T10:00:00Z"} ]`, want: "omitted timeBilledMs"},
-		{name: "foreign pod", body: `[ {"amount":1,"podId":"pod-two","time":"2026-08-25T10:00:00Z","timeBilledMs":1} ]`, want: "foreign pod"},
-		{name: "sub micro", body: `[ {"amount":0.0000001,"podId":"pod-one","time":"2026-08-25T10:00:00Z","timeBilledMs":1} ]`, want: "sub-micro"},
-		{name: "amount overflow", body: `[ {"amount":"9223372036854.775808","podId":"pod-one","time":"2026-08-25T10:00:00Z","timeBilledMs":1} ]`, want: "exceeds int64"},
-		{name: "negative billed time", body: `[ {"amount":1,"podId":"pod-one","time":"2026-08-25T10:00:00Z","timeBilledMs":-1} ]`, want: "negative timeBilledMs"},
-		{name: "total overflow", body: `[{"amount":"9223372036854.775807","podId":"pod-one","time":"2026-08-25T10:00:00Z","timeBilledMs":1},{"amount":"0.000001","podId":"pod-one","time":"2026-08-25T11:00:00Z","timeBilledMs":1}]`, want: "total USD micros overflow"},
-		{name: "total underflow", body: `[{"amount":"-9223372036854.775808","podId":"pod-one","time":"2026-08-25T10:00:00Z","timeBilledMs":1},{"amount":-0.000001,"podId":"pod-one","time":"2026-08-25T11:00:00Z","timeBilledMs":1}]`, want: "total USD micros overflow"},
-		{name: "response too large", body: strings.Repeat(" ", (16<<20)+1), want: "response exceeds 16777216 bytes"},
+		{name: "top level null", body: `null`, want: "JSON array", wantKind: "schema_ambiguity"},
+		{name: "missing amount", body: `[ {"podId":"pod-one","time":"2026-08-25T10:00:00Z","timeBilledMs":1} ]`, want: "omitted amount", wantKind: "schema_ambiguity"},
+		{name: "missing pod", body: `[ {"amount":1,"time":"2026-08-25T10:00:00Z","timeBilledMs":1} ]`, want: "omitted podId", wantKind: "schema_ambiguity"},
+		{name: "missing time", body: `[ {"amount":1,"podId":"pod-one","timeBilledMs":1} ]`, want: "omitted time", wantKind: "schema_ambiguity"},
+		{name: "missing billed time", body: `[ {"amount":1,"podId":"pod-one","time":"2026-08-25T10:00:00Z"} ]`, want: "omitted timeBilledMs", wantKind: "schema_ambiguity"},
+		{name: "foreign pod", body: `[ {"amount":1,"podId":"pod-two","time":"2026-08-25T10:00:00Z","timeBilledMs":1} ]`, want: "foreign pod", wantKind: "schema_ambiguity"},
+		{name: "sub micro", body: `[ {"amount":0.0000001,"podId":"pod-one","time":"2026-08-25T10:00:00Z","timeBilledMs":1} ]`, want: "sub-micro", wantKind: "submicro_amount"},
+		{name: "amount overflow", body: `[ {"amount":"9223372036854.775808","podId":"pod-one","time":"2026-08-25T10:00:00Z","timeBilledMs":1} ]`, want: "exceeds int64", wantKind: "amount_overflow"},
+		{name: "negative billed time", body: `[ {"amount":1,"podId":"pod-one","time":"2026-08-25T10:00:00Z","timeBilledMs":-1} ]`, want: "negative timeBilledMs", wantKind: "schema_ambiguity"},
+		{name: "total overflow", body: `[{"amount":"9223372036854.775807","podId":"pod-one","time":"2026-08-25T10:00:00Z","timeBilledMs":1},{"amount":"0.000001","podId":"pod-one","time":"2026-08-25T11:00:00Z","timeBilledMs":1}]`, want: "total USD micros overflow", wantKind: "amount_overflow"},
+		{name: "total underflow", body: `[{"amount":"-9223372036854.775808","podId":"pod-one","time":"2026-08-25T10:00:00Z","timeBilledMs":1},{"amount":-0.000001,"podId":"pod-one","time":"2026-08-25T11:00:00Z","timeBilledMs":1}]`, want: "total USD micros overflow", wantKind: "amount_overflow"},
+		{name: "response too large", body: strings.Repeat(" ", (16<<20)+1), want: "response exceeds 16777216 bytes", wantKind: "response_too_large"},
 	}
 
 	for _, test := range tests {
@@ -156,13 +166,29 @@ func TestGetPodBillingHistoryRefusesAmbiguousEvidence(t *testing.T) {
 			}))
 			defer server.Close()
 			client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL), runpod.WithMaxRetryAttempts(0))
-			start := time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)
 			got, err := client.GetPodBillingHistory(context.Background(), podID, start, start.Add(time.Hour))
 			if err == nil || got != nil {
 				t.Fatalf("GetPodBillingHistory = %+v, %v; want nil, error", got, err)
 			}
 			if !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error = %q; want substring %q", err, test.want)
+			}
+			var evidenceErr *runpod.PodBillingEvidenceError
+			if !errors.As(err, &evidenceErr) {
+				t.Fatalf("error type = %T; want *PodBillingEvidenceError", err)
+			}
+			if string(evidenceErr.Kind) != test.wantKind {
+				t.Errorf("Kind = %q; want %q", evidenceErr.Kind, test.wantKind)
+			}
+			if evidenceErr.NormalizedQuery != wantQuery {
+				t.Errorf("NormalizedQuery = %q; want %q", evidenceErr.NormalizedQuery, wantQuery)
+			}
+			if test.wantKind == "response_too_large" {
+				if len(evidenceErr.RawResponse) != 0 {
+					t.Errorf("oversize RawResponse has %d bytes; want 0", len(evidenceErr.RawResponse))
+				}
+			} else if string(evidenceErr.RawResponse) != test.body {
+				t.Errorf("RawResponse changed: got %q want %q", evidenceErr.RawResponse, test.body)
 			}
 		})
 	}
