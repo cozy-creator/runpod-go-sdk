@@ -61,21 +61,56 @@ func (r USDMicrosPerHour) MarshalJSON() ([]byte, error) {
 // parseJSONUSDMicros accepts the two exact currency representations RunPod
 // returns: a JSON number or a quoted JSON decimal. Null remains absence.
 func parseJSONUSDMicros(raw json.RawMessage) (int64, error) {
+	trimmed, err := parseJSONUSDDecimal(raw)
+	if err != nil {
+		return 0, err
+	}
+	return parseUSDMicros(trimmed)
+}
+
+// parseJSONUSDMicrosFloor is balance-only: RunPod reports account credits
+// beyond micro-USD precision. Flooring preserves a conservative purchasing
+// bound, while prices and billing records continue to require exact micros.
+func parseJSONUSDMicrosFloor(raw json.RawMessage) (int64, error) {
+	trimmed, err := parseJSONUSDDecimal(raw)
+	if err != nil {
+		return 0, err
+	}
+	value, ok := new(big.Rat).SetString(trimmed)
+	if !ok {
+		return 0, fmt.Errorf("invalid USD decimal %q", trimmed)
+	}
+	value.Mul(value, big.NewRat(usdMicrosPerUSD, 1))
+	quotient, remainder := new(big.Int), new(big.Int)
+	quotient.QuoRem(value.Num(), value.Denom(), remainder)
+	if value.Sign() < 0 && remainder.Sign() != 0 {
+		quotient.Sub(quotient, big.NewInt(1))
+	}
+	if !quotient.IsInt64() {
+		return 0, &usdMicrosParseError{
+			kind:    usdMicrosOverflow,
+			message: fmt.Sprintf("USD decimal %q exceeds int64 USD micros", trimmed),
+		}
+	}
+	return quotient.Int64(), nil
+}
+
+func parseJSONUSDDecimal(raw json.RawMessage) (string, error) {
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" || trimmed == "null" {
-		return 0, fmt.Errorf("USD decimal is absent")
+		return "", fmt.Errorf("USD decimal is absent")
 	}
 	if strings.HasPrefix(trimmed, `"`) {
 		var quoted string
 		if err := json.Unmarshal(raw, &quoted); err != nil {
-			return 0, fmt.Errorf("invalid quoted USD decimal: %w", err)
+			return "", fmt.Errorf("invalid quoted USD decimal: %w", err)
 		}
 		trimmed = quoted
 	}
 	if !jsonDecimalPattern.MatchString(trimmed) {
-		return 0, fmt.Errorf("invalid USD decimal %q", trimmed)
+		return "", fmt.Errorf("invalid USD decimal %q", trimmed)
 	}
-	return parseUSDMicros(trimmed)
+	return trimmed, nil
 }
 
 // parseUSDMicros converts one exact provider JSON decimal to integer USD

@@ -272,6 +272,12 @@ func TestClientBalancePreservesZeroAndRefusesAbsence(t *testing.T) {
 	if err != nil || got != 0 {
 		t.Fatalf("present zero balance = %v, %v; want 0, nil", got, err)
 	}
+	submicro := "178.7152935532"
+	srv.SetClientBalanceUSDDecimal(&submicro)
+	got, err = client.GetClientBalanceUSDMicros(context.Background())
+	if err != nil || got != 178_715_293 {
+		t.Fatalf("sub-micro balance = %v, %v; want conservative floor", got, err)
+	}
 
 	srv.SetClientBalanceUSDDecimal(nil)
 	if _, err := client.GetClientBalanceUSDMicros(context.Background()); err == nil {
