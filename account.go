@@ -30,9 +30,9 @@ func (c *Client) GetAccountID(ctx context.Context) (string, error) {
 	return accountID, nil
 }
 
-// GetClientBalanceUSDMicros returns RunPod's balance as exact integer USD
-// micros. An omitted/null field or account, sub-micro value, or overflow is
-// refused rather than silently becoming zero or rounding.
+// GetClientBalanceUSDMicros returns RunPod's balance as integer USD micros.
+// RunPod reports fractional credits beyond that precision, so this balance-only
+// read floors rather than overstates them. Prices and billing records remain exact.
 func (c *Client) GetClientBalanceUSDMicros(ctx context.Context) (int64, error) {
 	var result struct {
 		Myself *struct {
@@ -48,7 +48,7 @@ func (c *Client) GetClientBalanceUSDMicros(ctx context.Context) (int64, error) {
 	if len(result.Myself.ClientBalance) == 0 || strings.TrimSpace(string(result.Myself.ClientBalance)) == "null" {
 		return 0, fmt.Errorf("get RunPod client balance: response omitted myself.clientBalance")
 	}
-	micros, err := parseJSONUSDMicros(result.Myself.ClientBalance)
+	micros, err := parseJSONUSDMicrosFloor(result.Myself.ClientBalance)
 	if err != nil {
 		return 0, fmt.Errorf("get RunPod client balance: %w", err)
 	}

@@ -47,6 +47,20 @@ func TestParseJSONUSDMicrosRefusesInvalidValues(t *testing.T) {
 	}
 }
 
+func TestParseJSONUSDMicrosFloorIsConservative(t *testing.T) {
+	for raw, want := range map[string]int64{
+		`"178.7152935532"`: 178_715_293,
+		`0.0000009`:        0,
+		`-0.0000001`:       -1,
+		`"1e-6"`:           1,
+	} {
+		got, err := parseJSONUSDMicrosFloor(json.RawMessage(raw))
+		if err != nil || got != want {
+			t.Fatalf("parseJSONUSDMicrosFloor(%s) = %d, %v; want %d, nil", raw, got, err, want)
+		}
+	}
+}
+
 func TestUSDMicrosPerHourJSONUsesExactDollarDecimals(t *testing.T) {
 	for micros, want := range map[USDMicrosPerHour]string{
 		0: "0", 1: "0.000001", 250_000: "0.25", 1_000_001: "1.000001",
