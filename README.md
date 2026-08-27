@@ -90,6 +90,20 @@ pod, err := client.ExecuteCreatePod(ctx, body) // sends body unchanged
 
 `FindPodsByName` supports ambiguous-create readback. Names are not unique, so it returns every exact match and leaves adoption, health, and product-readiness decisions to the caller.
 
+### Pod billing history
+
+```go
+history, err := client.GetPodBillingHistory(ctx, podID, startUTC, endUTC)
+if err != nil { /* billing evidence is not usable */ }
+for _, record := range history.Records {
+    fmt.Printf("%s: %d USD micros for %d ms\n",
+        record.BucketStart, record.AmountUSDMicros, record.TimeBilledMs)
+}
+// Persist history.NormalizedQuery and history.RawResponse as provider evidence.
+```
+
+Amounts and the checked total are exact integer USD micros; signed records are preserved as provider corrections, never rounded through `float64`. The exact response is limited to 16 MiB. An empty array is valid zero-cost evidence, but it is not a provider finality assertion.
+
 ### Pod logs
 
 RunPod's public REST/GraphQL APIs expose no pod-log endpoint. The SDK deliberately has no log-fetching surface; use `GetPodDiagnostics` for status/runtime/machine troubleshooting.
