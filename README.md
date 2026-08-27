@@ -53,9 +53,9 @@ Retries: GETs and other idempotent requests retry on 5xx/429 with exponential ba
 | `CreatePodWithFallback` | Explicit per-GPU-type fan-out with filter/failure hooks |
 | `CreateSpotPod` | Create an interruptible (spot) pod |
 | `GetPod` / `GetPodWithOptions` | Fetch a pod (optional `includeMachine`, `includeNetworkVolume`, ...) |
-| `GetPodReadback` | Join REST machine/price/volume with current-generation GraphQL telemetry and public port mappings |
-| `GetPodLifecycleObservation` | Read desired state, start generation, and latest provider telemetry through GraphQL |
-| `GetPodTerminalError` | Classify REST terminal states or fresh current-generation `exited` telemetry |
+| `GetPodReadback` | Preserve independently timed REST + GraphQL pod evidence, detailed runtime/error facts, join checks, and a coherence grade |
+| `GetPodLifecycleObservation` | Read desired state, last-start timestamp, runtime uptime, and latest provider telemetry through GraphQL |
+| `GetPodTerminalError` | Classify provider-desired terminal states; unfenced telemetry remains diagnostic evidence |
 | `ListPods` | List pods with pagination |
 | `FindPodsByName` | Return every exact name match; makes no adoption/readiness inference |
 | `StopPod` / `ResumePod` / `TerminatePod` | Lifecycle |
@@ -203,7 +203,7 @@ Secrets: `CreateSecret` / `GetSecret` / `UpdateSecret` / `CreateOrUpdateSecret` 
 | Resource | Transport | Coverage |
 |----------|-----------|----------|
 | Pods (CRUD, stop/resume, fallback, timing, diagnostics) | REST | Full |
-| Coherent pod runtime readback | REST + GraphQL | Machine/price/volume + generation-fenced telemetry/public ports |
+| Detailed pod readback | REST + GraphQL | Both source snapshots, observation windows, machine/price/volume/runtime evidence, public ports, per-field checks, typed stage failures |
 | Pod lifecycle observation | GraphQL | Query only |
 | Serverless jobs (run/runsync/status/cancel/retry/purge/health/stream) | REST (api.runpod.ai) | Full |
 | GPU types / availability / offers | GraphQL | Query only |

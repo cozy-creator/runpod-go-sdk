@@ -6,12 +6,15 @@ import (
 	"strings"
 )
 
-// PodLifecycleTelemetry is RunPod's latest observed container state.
-// State is provider-defined; Time identifies the start generation the sample
-// belongs to when compared with PodLifecycleObservation.LastStartedAt.
+// PodLifecycleTelemetry is RunPod's latest observed container state. RunPod
+// does not expose a container incarnation ID: Time and LastStartedAt are
+// independent timestamps and must not be treated as a generation fence.
 type PodLifecycleTelemetry struct {
-	State string    `json:"state"`
-	Time  *JSONTime `json:"time,omitempty"`
+	State                        string    `json:"state"`
+	Time                         *JSONTime `json:"time,omitempty"`
+	CPUUtilization               *float64  `json:"cpuUtilization,omitempty"`
+	MemoryUtilization            *float64  `json:"memoryUtilization,omitempty"`
+	LastStateTransitionTimestamp *int64    `json:"lastStateTransitionTimestamp,omitempty"`
 }
 
 // PodLifecycleObservation is the read-only lifecycle state exposed by
@@ -25,9 +28,9 @@ type PodLifecycleObservation struct {
 	RuntimeUptimeInSeconds *int
 }
 
-// GetPodLifecycleObservation returns RunPod's current desired state, start
-// generation, and latest telemetry sample for a pod. RuntimeUptimeInSeconds is
-// diagnostic only; negative uptime by itself is not a terminal signal.
+// GetPodLifecycleObservation returns RunPod's desired state, last-start
+// timestamp, and latest telemetry sample for a pod. RuntimeUptimeInSeconds is
+// diagnostic only; no timestamp or uptime value identifies an incarnation.
 func (c *Client) GetPodLifecycleObservation(ctx context.Context, podID string) (*PodLifecycleObservation, error) {
 	if err := c.validateRequired("podID", podID); err != nil {
 		return nil, err
@@ -81,16 +84,4 @@ func isTerminalPodStatus(status string) bool {
 	default:
 		return false
 	}
-}
-
-func hasFreshTerminalTelemetry(observation *PodLifecycleObservation) bool {
-	if observation == nil || observation.LastStartedAt == nil || observation.LatestTelemetry == nil || observation.LatestTelemetry.Time == nil {
-		return false
-	}
-	// RunPod documents telemetry state only as a String. "exited" is the
-	// provider-observed terminal value; unknown values remain nonterminal.
-	if !strings.EqualFold(strings.TrimSpace(observation.LatestTelemetry.State), "exited") {
-		return false
-	}
-	return !observation.LatestTelemetry.Time.Time.Before(observation.LastStartedAt.Time)
 }

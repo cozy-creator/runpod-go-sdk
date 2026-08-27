@@ -41,15 +41,15 @@ func (c *Client) DiscoverSSHTarget(ctx context.Context, podID string) (*SSHTarge
 		return nil, err
 	}
 
-	pod, err := c.getPodRuntimeReadback(ctx, podID)
+	ports, runtimePresent, err := c.getPodSSHRuntimePorts(ctx, podID)
 	if err != nil {
 		return nil, fmt.Errorf("ssh-discover %s: %w", podID, err)
 	}
-	if pod.Runtime == nil {
+	if !runtimePresent {
 		return nil, fmt.Errorf("ssh-discover %s: runtime not yet up (still pulling image or starting?)", podID)
 	}
 
-	for _, p := range pod.Runtime.Ports {
+	for _, p := range ports {
 		if p.PrivatePort != 22 {
 			continue
 		}
@@ -65,8 +65,40 @@ func (c *Client) DiscoverSSHTarget(ctx context.Context, podID string) (*SSHTarge
 	}
 
 	// Surface the available mappings so callers can spot a misconfigured pod.
-	available, _ := json.Marshal(pod.Runtime.Ports)
+	available, _ := json.Marshal(ports)
 	return nil, fmt.Errorf("ssh-discover %s: no privatePort=22/tcp mapping (was pod created with PUBLIC_KEY env?). available ports=%s", podID, string(available))
+}
+
+func (c *Client) getPodSSHRuntimePorts(ctx context.Context, podID string) ([]PodRuntimePort, bool, error) {
+	const query = `query($input: PodFilter!) {
+  pod(input: $input) {
+    id
+    runtime { ports { ip isIpPublic privatePort publicPort type } }
+  }
+}`
+	var response struct {
+		Pod *struct {
+			ID      string `json:"id"`
+			Runtime *struct {
+				Ports []PodRuntimePort `json:"ports"`
+			} `json:"runtime"`
+		} `json:"pod"`
+	}
+	if err := c.GraphQL(ctx, query, map[string]interface{}{
+		"input": map[string]interface{}{"podId": podID},
+	}, &response); err != nil {
+		return nil, false, err
+	}
+	if response.Pod == nil {
+		return nil, false, NewAPIErrorWithDetails(404, "pod not found", podID)
+	}
+	if strings.TrimSpace(response.Pod.ID) != podID {
+		return nil, false, fmt.Errorf("provider returned pod id %q for requested id %q", response.Pod.ID, podID)
+	}
+	if response.Pod.Runtime == nil {
+		return nil, false, nil
+	}
+	return append([]PodRuntimePort(nil), response.Pod.Runtime.Ports...), true, nil
 }
 
 // StreamPodCommandOptions configures how StreamPodCommand invokes ssh.

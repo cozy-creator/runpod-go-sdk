@@ -1,6 +1,7 @@
 package runpod
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -29,6 +30,10 @@ type APIError struct {
 	Details    string `json:"details,omitempty"`
 	Code       string `json:"code,omitempty"`
 	RequestID  string `json:"requestId,omitempty"`
+	// ResponseBody preserves the provider's exact error bytes. RunPod has
+	// multiple structured and prose error shapes; known fields above remain
+	// convenient while this prevents unknown diagnostics from being dropped.
+	ResponseBody json.RawMessage `json:"-"`
 
 	// RetryAfter is populated from the Retry-After header on 429 responses.
 	RetryAfter time.Duration `json:"-"`
@@ -36,7 +41,13 @@ type APIError struct {
 
 func (e *APIError) Error() string {
 	if e.Code != "" {
-		return fmt.Sprintf("RunPod API Error %d (%s): %s - %s", e.StatusCode, e.Code, e.Message, e.Details)
+		if e.Details != "" {
+			return fmt.Sprintf("RunPod API Error %d (%s): %s - %s", e.StatusCode, e.Code, e.Message, e.Details)
+		}
+		return fmt.Sprintf("RunPod API Error %d (%s): %s", e.StatusCode, e.Code, e.Message)
+	}
+	if e.Details != "" {
+		return fmt.Sprintf("RunPod API Error %d: %s - %s", e.StatusCode, e.Message, e.Details)
 	}
 	return fmt.Sprintf("RunPod API Error %d: %s", e.StatusCode, e.Message)
 }

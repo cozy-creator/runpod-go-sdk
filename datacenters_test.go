@@ -89,8 +89,8 @@ func TestListDataCentersGraphQLError(t *testing.T) {
 
 	client := mustClient(t, "test_key", runpod.WithGraphQLBaseURL(server.URL), runpod.WithMaxRetryAttempts(0))
 	_, err := client.ListDataCenters(t.Context(), nil)
-	var apiErr *runpod.APIError
-	if !errors.As(err, &apiErr) || apiErr.Details != "inventory unavailable" {
+	var graphQLErr *runpod.GraphQLResponseError
+	if !errors.As(err, &graphQLErr) || len(graphQLErr.Errors) != 1 || graphQLErr.Errors[0].Message != "inventory unavailable" {
 		t.Fatalf("error = %v", err)
 	}
 }
