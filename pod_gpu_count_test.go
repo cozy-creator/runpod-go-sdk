@@ -12,24 +12,19 @@ import (
 )
 
 func TestFindPodsByNamePagination(t *testing.T) {
-	t.Run("short page does not hide later matches", func(t *testing.T) {
+	t.Run("short page is terminal", func(t *testing.T) {
+		requests := 0
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests++
 			w.Header().Set("Content-Type", "application/json")
-			switch r.URL.Query().Get("offset") {
-			case "0":
-				_, _ = fmt.Fprint(w, `[{"id":"pod-a","name":"obligation-1"}]`)
-			case "1":
-				_, _ = fmt.Fprint(w, `[{"id":"pod-b","name":"obligation-1"}]`)
-			default:
-				_, _ = fmt.Fprint(w, `[]`)
-			}
+			_, _ = fmt.Fprint(w, `[{"id":"pod-a","name":"obligation-1"}]`)
 		}))
 		defer server.Close()
 
 		client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL))
 		pods, err := client.FindPodsByName(context.Background(), "obligation-1")
-		if err != nil || len(pods) != 2 {
-			t.Fatalf("FindPodsByName = %+v, %v; want both short-page matches", pods, err)
+		if err != nil || len(pods) != 1 || requests != 1 {
+			t.Fatalf("FindPodsByName = %+v, %v after %d request(s); want one terminal short page", pods, err, requests)
 		}
 	})
 
