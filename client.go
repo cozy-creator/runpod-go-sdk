@@ -383,10 +383,15 @@ func (c *Client) parseErrorResponse(statusCode int, header http.Header, body []b
 	if err := json.Unmarshal(body, &structured); err == nil && structured.Message != "" {
 		structured.StatusCode = statusCode
 		structured.RetryAfter = retryAfter
+		structured.ResponseBody = append(json.RawMessage(nil), body...)
 		return &structured
 	}
 
-	apiErr := &APIError{StatusCode: statusCode, RetryAfter: retryAfter}
+	apiErr := &APIError{
+		StatusCode:   statusCode,
+		RetryAfter:   retryAfter,
+		ResponseBody: append(json.RawMessage(nil), body...),
+	}
 
 	// Try to parse as simple error message.
 	var simpleErr struct {

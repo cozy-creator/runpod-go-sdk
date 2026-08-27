@@ -13,13 +13,44 @@ type graphQLRequest struct {
 	Variables map[string]interface{} `json:"variables,omitempty"`
 }
 
-type graphQLError struct {
-	Message string `json:"message"`
+// GraphQLErrorLocation is one source location reported by GraphQL validation
+// or execution.
+type GraphQLErrorLocation struct {
+	Line   int `json:"line"`
+	Column int `json:"column"`
+}
+
+// GraphQLError preserves one complete provider error entry. Extensions stays
+// raw by key so newly added provider diagnostics are not silently discarded.
+type GraphQLError struct {
+	Message    string                     `json:"message"`
+	Locations  []GraphQLErrorLocation     `json:"locations,omitempty"`
+	Path       []interface{}              `json:"path,omitempty"`
+	Extensions map[string]json.RawMessage `json:"extensions,omitempty"`
+}
+
+// GraphQLResponseError preserves every provider error rather than collapsing
+// the response to the first message or pretending it was an HTTP 400.
+type GraphQLResponseError struct {
+	Errors []GraphQLError
+}
+
+func (e *GraphQLResponseError) Error() string {
+	messages := make([]string, 0, len(e.Errors))
+	for _, item := range e.Errors {
+		if message := strings.TrimSpace(item.Message); message != "" {
+			messages = append(messages, message)
+		}
+	}
+	if len(messages) == 0 {
+		return "runpod: GraphQL request failed without provider error text"
+	}
+	return "runpod: GraphQL request failed: " + strings.Join(messages, "; ")
 }
 
 type graphQLResponse struct {
 	Data   json.RawMessage `json:"data"`
-	Errors []graphQLError  `json:"errors,omitempty"`
+	Errors []GraphQLError  `json:"errors,omitempty"`
 }
 
 // GraphQL executes a typed GraphQL request against RunPod's GraphQL API.
@@ -62,11 +93,7 @@ func (c *Client) GraphQL(ctx context.Context, query string, variables map[string
 	}
 
 	if len(envelope.Errors) > 0 {
-		msg := strings.TrimSpace(envelope.Errors[0].Message)
-		if msg == "" {
-			msg = "GraphQL request failed"
-		}
-		return NewAPIErrorWithDetails(400, "graphql error", msg)
+		return &GraphQLResponseError{Errors: append([]GraphQLError(nil), envelope.Errors...)}
 	}
 
 	if result == nil || len(envelope.Data) == 0 || string(envelope.Data) == "null" {

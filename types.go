@@ -123,10 +123,14 @@ type Pod struct {
 	Locked                    bool              `json:"locked"`
 	Interruptible             bool              `json:"interruptible"`
 	PublicIP                  string            `json:"publicIp,omitempty"`
-	Runtime                   *PodRuntime       `json:"runtime,omitempty"`
-	Machine                   *Machine          `json:"machine,omitempty"`
-	NetworkVolume             *NetworkVolume    `json:"networkVolume,omitempty"`
-	NetworkVolumeID           string            `json:"networkVolumeId,omitempty"`
+	// PortMappings is REST's top-level private-to-public port map when the
+	// provider includes it. GraphQL's independently observed detailed rows are
+	// retained by GetPodReadback instead of being folded into this map.
+	PortMappings    map[string]int `json:"portMappings,omitempty"`
+	Runtime         *PodRuntime    `json:"runtime,omitempty"`
+	Machine         *Machine       `json:"machine,omitempty"`
+	NetworkVolume   *NetworkVolume `json:"networkVolume,omitempty"`
+	NetworkVolumeID string         `json:"networkVolumeId,omitempty"`
 
 	// CPU-pod-specific response fields. RunPod's REST `POST /pods` returns
 	// `cpuFlavorId` (the family the instance was placed on, e.g. "cpu3c")

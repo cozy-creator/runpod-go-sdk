@@ -84,117 +84,21 @@ func TestGetPodLifecycleObservation_NotFound(t *testing.T) {
 	}
 }
 
-func TestGetPodTerminalError_TelemetryStartGeneration(t *testing.T) {
+func TestGetPodTerminalError_TelemetryDoesNotFenceAContainer(t *testing.T) {
 	start := lifecycleTime("2026-07-15T13:41:27Z")
-	oldExit := lifecycleTime("2026-07-15T13:40:00Z")
-	freshExit := lifecycleTime("2026-07-15T13:41:42Z")
-	negativeUptime := -17
+	exit := lifecycleTime("2026-07-15T13:41:42Z")
+	srv := runpodtest.New()
+	t.Cleanup(srv.Close)
+	srv.AddPod(&runpod.Pod{ID: "pod-1", DesiredStatus: "RUNNING", LastStartedAt: start})
+	srv.SetPodLifecycleObservation(&runpod.PodLifecycleObservation{
+		PodID:           "pod-1",
+		DesiredStatus:   "RUNNING",
+		LastStartedAt:   start,
+		LatestTelemetry: &runpod.PodLifecycleTelemetry{State: "exited", Time: exit},
+	})
 
-	tests := []struct {
-		name        string
-		observation *runpod.PodLifecycleObservation
-		wantDead    bool
-		wantMessage string
-	}{
-		{
-			name: "fresh exited telemetry overrides running desired status",
-			observation: &runpod.PodLifecycleObservation{
-				DesiredStatus:   "RUNNING",
-				LastStartedAt:   start,
-				LatestTelemetry: &runpod.PodLifecycleTelemetry{State: "exited", Time: freshExit},
-			},
-			wantDead:    true,
-			wantMessage: "provider telemetry state exited",
-		},
-		{
-			name: "telemetry at generation boundary is current",
-			observation: &runpod.PodLifecycleObservation{
-				DesiredStatus:   "RUNNING",
-				LastStartedAt:   start,
-				LatestTelemetry: &runpod.PodLifecycleTelemetry{State: "EXITED", Time: start},
-			},
-			wantDead: true,
-		},
-		{
-			name: "resumed generation ignores prior exit",
-			observation: &runpod.PodLifecycleObservation{
-				DesiredStatus:   "RUNNING",
-				LastStartedAt:   start,
-				LatestTelemetry: &runpod.PodLifecycleTelemetry{State: "exited", Time: oldExit},
-			},
-		},
-		{
-			name: "missing telemetry timestamp is nonterminal",
-			observation: &runpod.PodLifecycleObservation{
-				DesiredStatus:   "RUNNING",
-				LastStartedAt:   start,
-				LatestTelemetry: &runpod.PodLifecycleTelemetry{State: "exited"},
-			},
-		},
-		{
-			name: "missing start generation is nonterminal",
-			observation: &runpod.PodLifecycleObservation{
-				DesiredStatus:   "RUNNING",
-				LatestTelemetry: &runpod.PodLifecycleTelemetry{State: "exited", Time: freshExit},
-			},
-		},
-		{
-			name: "negative uptime alone is nonterminal",
-			observation: &runpod.PodLifecycleObservation{
-				DesiredStatus:          "RUNNING",
-				LastStartedAt:          start,
-				LatestTelemetry:        &runpod.PodLifecycleTelemetry{State: "running", Time: freshExit},
-				RuntimeUptimeInSeconds: &negativeUptime,
-			},
-		},
-		{
-			name: "unknown telemetry state is nonterminal",
-			observation: &runpod.PodLifecycleObservation{
-				DesiredStatus:   "RUNNING",
-				LastStartedAt:   start,
-				LatestTelemetry: &runpod.PodLifecycleTelemetry{State: "failed", Time: freshExit},
-			},
-		},
-		{
-			name: "graphql desired exit is terminal without telemetry",
-			observation: &runpod.PodLifecycleObservation{
-				DesiredStatus: "EXITED",
-				LastStartedAt: start,
-			},
-			wantDead:    true,
-			wantMessage: "GraphQL desired status EXITED",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			srv := runpodtest.New()
-			t.Cleanup(srv.Close)
-			podID := strings.ReplaceAll(tc.name, " ", "-")
-			srv.AddPod(&runpod.Pod{ID: podID, DesiredStatus: "RUNNING", LastStartedAt: start})
-			observation := *tc.observation
-			observation.PodID = podID
-			srv.SetPodLifecycleObservation(&observation)
-
-			verdict, dead, err := srv.MustClient().GetPodTerminalError(context.Background(), podID, nil)
-			if err != nil {
-				t.Fatalf("GetPodTerminalError: %v", err)
-			}
-			if dead != tc.wantDead {
-				t.Fatalf("dead=%v want %v, verdict=%+v", dead, tc.wantDead, verdict)
-			}
-			if !tc.wantDead {
-				if verdict != nil {
-					t.Fatalf("nonterminal verdict: %+v", verdict)
-				}
-				return
-			}
-			if verdict == nil || verdict.Reason != "pod_exited" || verdict.Class != runpod.PodErrorUnknown {
-				t.Fatalf("unexpected terminal verdict: %+v", verdict)
-			}
-			if tc.wantMessage != "" && !strings.Contains(verdict.Message, tc.wantMessage) {
-				t.Fatalf("message %q does not contain %q", verdict.Message, tc.wantMessage)
-			}
-		})
+	verdict, dead, err := srv.MustClient().GetPodTerminalError(context.Background(), "pod-1", nil)
+	if err != nil || dead || verdict != nil {
+		t.Fatalf("unfenced telemetry became a terminal verdict: verdict=%+v dead=%v err=%v", verdict, dead, err)
 	}
 }

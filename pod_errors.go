@@ -18,9 +18,10 @@ import (
 //     "Exited by Runpod: <ts>" with NO error class. With includeMachine the
 //     record carries the host machine id / GPU type / datacenter, and the
 //     runtime block (when still present) the container exit code.
-//   - GraphQL pod{...}: desiredStatus plus current lastStartedAt and
-//     latestTelemetry{state,time}; telemetry can expose a current-generation
-//     container exit while REST desiredStatus is still RUNNING.
+//   - GraphQL pod{...}: desiredStatus, lastStartedAt and
+//     latestTelemetry{state,time}. RunPod exposes no container-incarnation ID,
+//     and lastStartedAt remained unchanged across measured crash restarts, so
+//     telemetry is diagnostic evidence rather than a generation-fenced verdict.
 //   - No pod-logs endpoint exists on the public API surface
 //     (GetProviderFeatureSupport documents this), so a last-log tail cannot
 //     be fetched.
@@ -78,10 +79,10 @@ type PodTerminalError struct {
 	DataCenterID string
 	// UptimeSeconds is the runtime block's uptime at observation, when present.
 	UptimeSeconds int
-	// ContainerObserved reports that a container generation demonstrably ran
-	// (exit code present, positive uptime, or fresh terminal telemetry for
-	// the current start generation). False = the pod died before any
-	// container start the API surface can prove (placement / image pull).
+	// ContainerObserved reports that a container demonstrably ran (exit code
+	// present or positive REST uptime). False means the provider APIs did not
+	// expose evidence strong enough to prove a start; telemetry alone is not
+	// incarnation-fenced and therefore does not set this bit.
 	ContainerObserved bool
 	// ProbeOutcome is the raw registry-probe outcome (RegistryProbe*
 	// constants; empty = no probe ran).
@@ -136,7 +137,6 @@ func (c *Client) GetPodTerminalError(ctx context.Context, podID string, opts *Po
 		return nil, false, err
 	}
 	providerDetail := ""
-	freshTerminalTelemetry := false
 	if !isTerminalPodStatus(pod.DesiredStatus) {
 		observation, err := c.GetPodLifecycleObservation(ctx, podID)
 		if err != nil {
@@ -145,10 +145,6 @@ func (c *Client) GetPodTerminalError(ctx context.Context, podID string, opts *Po
 		switch {
 		case isTerminalPodStatus(observation.DesiredStatus):
 			providerDetail = "GraphQL desired status " + strings.TrimSpace(observation.DesiredStatus)
-		case hasFreshTerminalTelemetry(observation):
-			freshTerminalTelemetry = true
-			providerDetail = "provider telemetry state exited at " + observation.LatestTelemetry.Time.Time.UTC().Format(time.RFC3339Nano) +
-				" for start generation " + observation.LastStartedAt.Time.UTC().Format(time.RFC3339Nano)
 		default:
 			return nil, false, nil
 		}
@@ -185,7 +181,7 @@ func (c *Client) GetPodTerminalError(ctx context.Context, podID string, opts *Po
 		verdict.ExitCode = pod.Runtime.ContainerExitCode
 		verdict.UptimeSeconds = pod.Runtime.UptimeSeconds
 	}
-	verdict.ContainerObserved = verdict.ExitCode != nil || verdict.UptimeSeconds > 0 || freshTerminalTelemetry
+	verdict.ContainerObserved = verdict.ExitCode != nil || verdict.UptimeSeconds > 0
 
 	// Spot reclaim: typed provider flag.
 	if pod.Interruptible {
