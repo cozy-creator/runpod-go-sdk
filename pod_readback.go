@@ -578,19 +578,46 @@ func validateRuntimePorts(pod *Pod, ports []PodRuntimePort) (string, error) {
 	return graphQLPublicIP, nil
 }
 
-// PublicTCPPortMappings returns GraphQL's observed public TCP mappings keyed
-// by private container port. It does not claim the mappings belong to a
-// particular container incarnation. The returned map is a copy.
-func (r *PodReadback) PublicTCPPortMappings() map[int]int {
-	out := map[int]int{}
-	if r == nil || r.GraphQL == nil || r.GraphQL.Runtime == nil {
-		return out
+// ValidatedPublicTCPEndpoints returns GraphQL's complete public TCP runtime
+// rows after rechecking pod identity, every requested port, public IP, and
+// every REST mapping against the independently observed GraphQL rows. The
+// returned rows remain provider evidence, not a container-generation fence;
+// a caller establishes process identity through its own authenticated
+// application handshake.
+func (r *PodReadback) ValidatedPublicTCPEndpoints() ([]PodRuntimePort, error) {
+	if r == nil {
+		return nil, fmt.Errorf("runpod: cannot select public TCP endpoints from a nil pod readback")
 	}
+	podID := strings.TrimSpace(r.RequestedPodID)
+	if r.REST == nil {
+		return nil, fmt.Errorf("runpod: pod %q has no REST readback for public TCP endpoints", podID)
+	}
+	if r.GraphQL == nil {
+		return nil, fmt.Errorf("runpod: pod %q has no GraphQL readback for public TCP endpoints", podID)
+	}
+	if strings.TrimSpace(r.REST.ID) != podID || strings.TrimSpace(r.GraphQL.ID) != podID {
+		return nil, fmt.Errorf(
+			"runpod: pod identity mismatch selecting public TCP endpoints: requested=%q rest=%q graphql=%q",
+			podID, r.REST.ID, r.GraphQL.ID,
+		)
+	}
+	if r.GraphQL.Runtime == nil {
+		return nil, fmt.Errorf("runpod: pod %q GraphQL readback has no runtime for public TCP endpoints", podID)
+	}
+	if _, err := validateRuntimePorts(r.REST, r.GraphQL.Runtime.Ports); err != nil {
+		return nil, fmt.Errorf("runpod: pod %q runtime port evidence is invalid: %w", podID, err)
+	}
+	out := make([]PodRuntimePort, 0, len(r.GraphQL.Runtime.Ports))
 	for _, port := range r.GraphQL.Runtime.Ports {
-		if port.IsIPPublic && strings.EqualFold(strings.TrimSpace(port.Type), "tcp") &&
-			port.PrivatePort > 0 && port.PrivatePort <= 65535 && port.PublicPort > 0 && port.PublicPort <= 65535 {
-			out[port.PrivatePort] = port.PublicPort
+		if port.IsIPPublic && strings.EqualFold(strings.TrimSpace(port.Type), "tcp") {
+			out = append(out, port)
 		}
 	}
-	return out
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].PrivatePort != out[j].PrivatePort {
+			return out[i].PrivatePort < out[j].PrivatePort
+		}
+		return out[i].PublicPort < out[j].PublicPort
+	})
+	return out, nil
 }
