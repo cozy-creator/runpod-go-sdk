@@ -25,27 +25,6 @@ type SSHTarget struct {
 	User string
 }
 
-type podRuntimePortGQL struct {
-	IP          string `json:"ip"`
-	IsIPPublic  bool   `json:"isIpPublic"`
-	PrivatePort int    `json:"privatePort"`
-	PublicPort  int    `json:"publicPort"`
-	Type        string `json:"type"`
-}
-
-type podRuntimeForSSHGQL struct {
-	Ports []podRuntimePortGQL `json:"ports"`
-}
-
-type podForSSHGQL struct {
-	ID      string               `json:"id"`
-	Runtime *podRuntimeForSSHGQL `json:"runtime"`
-}
-
-type sshDiscoveryResp struct {
-	Pod *podForSSHGQL `json:"pod"`
-}
-
 // DiscoverSSHTarget reads the pod's runtime port mappings and returns the
 // publicly-routable host:port that maps to in-pod port 22.
 //
@@ -62,36 +41,15 @@ func (c *Client) DiscoverSSHTarget(ctx context.Context, podID string) (*SSHTarge
 		return nil, err
 	}
 
-	query := `query($input: PodFilter!) {
-  pod(input: $input) {
-    id
-    runtime {
-      ports {
-        ip
-        isIpPublic
-        privatePort
-        publicPort
-        type
-      }
-    }
-  }
-}`
-	variables := map[string]interface{}{
-		"input": map[string]interface{}{"podId": podID},
-	}
-
-	var resp sshDiscoveryResp
-	if err := c.GraphQL(ctx, query, variables, &resp); err != nil {
+	pod, err := c.getPodRuntimeReadback(ctx, podID)
+	if err != nil {
 		return nil, fmt.Errorf("ssh-discover %s: %w", podID, err)
 	}
-	if resp.Pod == nil {
-		return nil, fmt.Errorf("ssh-discover %s: pod not found", podID)
-	}
-	if resp.Pod.Runtime == nil {
+	if pod.Runtime == nil {
 		return nil, fmt.Errorf("ssh-discover %s: runtime not yet up (still pulling image or starting?)", podID)
 	}
 
-	for _, p := range resp.Pod.Runtime.Ports {
+	for _, p := range pod.Runtime.Ports {
 		if p.PrivatePort != 22 {
 			continue
 		}
@@ -107,7 +65,7 @@ func (c *Client) DiscoverSSHTarget(ctx context.Context, podID string) (*SSHTarge
 	}
 
 	// Surface the available mappings so callers can spot a misconfigured pod.
-	available, _ := json.Marshal(resp.Pod.Runtime.Ports)
+	available, _ := json.Marshal(pod.Runtime.Ports)
 	return nil, fmt.Errorf("ssh-discover %s: no privatePort=22/tcp mapping (was pod created with PUBLIC_KEY env?). available ports=%s", podID, string(available))
 }
 
