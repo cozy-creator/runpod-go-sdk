@@ -214,6 +214,9 @@ func (c *Client) FindPodsByName(ctx context.Context, name string) ([]*Pod, error
 				matches = append(matches, pod)
 			}
 		}
+		if len(page) < podNameLookupPageSize {
+			break
+		}
 		if !advanced {
 			return nil, fmt.Errorf("find pods by name %q: pagination did not advance at offset %d", name, offset)
 		}
