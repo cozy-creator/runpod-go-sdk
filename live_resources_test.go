@@ -4,6 +4,7 @@ package runpod_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -78,8 +79,13 @@ func TestGPUOffersLive(t *testing.T) {
 		t.Fatal("expected at least one in-stock offer")
 	}
 	for _, o := range offers[:min(len(offers), 5)] {
-		t.Logf("offer %s cloud=%s stock=%s ondemand=$%.3f minbid=$%.3f",
-			o.GPUTypeID, o.CloudType, o.StockStatus, o.OnDemandPriceUSDMicrosPerHour, o.MinimumBidPriceUSDMicrosPerHour)
+		minimumBid := "unavailable"
+		if o.MinimumBidPriceUSDMicrosPerHour != nil {
+			minimumBid = fmt.Sprintf("$%.6f", float64(*o.MinimumBidPriceUSDMicrosPerHour)/1_000_000)
+		}
+		t.Logf("offer %s cloud=%s stock=%s ondemand=$%.6f minbid=%s",
+			o.GPUTypeID, o.CloudType, o.StockStatus,
+			float64(o.OnDemandPriceUSDMicrosPerHour)/1_000_000, minimumBid)
 	}
 }
 

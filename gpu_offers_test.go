@@ -89,11 +89,10 @@ func TestListGPUOffersRejectsInvalidShape(t *testing.T) {
 	}
 }
 
-func TestListGPUOffersRefusesInexactOrMissingPrices(t *testing.T) {
+func TestListGPUOffersRefusesInexactPrices(t *testing.T) {
 	for name, price := range map[string]string{
-		"missing on-demand": `{"minimumBidPrice":0.1,"stockStatus":"High"}`,
-		"sub-micro":         `{"minimumBidPrice":0.0000001,"uninterruptablePrice":0.4,"stockStatus":"High"}`,
-		"overflow":          `{"minimumBidPrice":0.1,"uninterruptablePrice":"9223372036854.775808","stockStatus":"High"}`,
+		"sub-micro": `{"minimumBidPrice":0.0000001,"uninterruptablePrice":0.4,"stockStatus":"High"}`,
+		"overflow":  `{"minimumBidPrice":0.1,"uninterruptablePrice":"9223372036854.775808","stockStatus":"High"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -105,6 +104,21 @@ func TestListGPUOffersRefusesInexactOrMissingPrices(t *testing.T) {
 				t.Fatal("purchase-authority price must refuse")
 			}
 		})
+	}
+}
+
+func TestListGPUOffersSkipsOnlyUnpricedCloudArm(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"data":{"gpuTypes":[
+			{"id":"unpriced","secureCloud":true,"secure":{"minimumBidPrice":0.1,"stockStatus":"High"}},
+			{"id":"priced","secureCloud":true,"secure":{"uninterruptablePrice":"0.4","stockStatus":"High"}}
+		]}}`)
+	}))
+	defer server.Close()
+	client := mustClient(t, "test_key", runpod.WithGraphQLBaseURL(server.URL))
+	offers, err := client.ListGPUOffers(t.Context(), nil)
+	if err != nil || len(offers) != 1 || offers[0].GPUTypeID != "priced" {
+		t.Fatalf("offers = %+v, %v; want only the priced arm", offers, err)
 	}
 }
 
