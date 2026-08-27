@@ -11,6 +11,19 @@ import (
 	runpod "github.com/cozy-creator/runpod-go-sdk"
 )
 
+func TestPodPortMappingsNormalizesRuntimeShapes(t *testing.T) {
+	pod := &runpod.Pod{Runtime: &runpod.PodRuntime{Ports: map[string]interface{}{
+		"43100/tcp": map[string]interface{}{"publicPort": float64(53100)},
+		"media":     []interface{}{map[string]interface{}{"port": "53101"}},
+		"invalid":   map[string]interface{}{"publicPort": 0},
+	}}}
+
+	got := runpod.PodPortMappings(pod)
+	if len(got) != 2 || got["43100/tcp"] != 53100 || got["media"] != 53101 {
+		t.Fatalf("normalized port mappings = %#v", got)
+	}
+}
+
 func TestGetPodWithOptions_QueryParams(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer test_key" {
