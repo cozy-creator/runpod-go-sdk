@@ -126,6 +126,17 @@ func derivePortMappings(pod *Pod) map[string]int {
 	return out
 }
 
+// PodPortMappings returns the provider's runtime port keys mapped to normalized
+// public ports. Runtime values have appeared as numbers, strings, objects, and
+// one-element arrays; callers should not decode those wire variants again.
+//
+// Keys remain provider-authored because RunPod has used both container-port
+// spellings (for example, "22/tcp") and service names. A caller that needs a
+// private container port must validate that identity separately.
+func PodPortMappings(pod *Pod) map[string]int {
+	return derivePortMappings(pod)
+}
+
 func coercePortValue(v interface{}) int {
 	switch t := v.(type) {
 	case float64:
