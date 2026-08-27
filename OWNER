@@ -1,5 +1,0 @@
-owner: codex (/root/runpod_sdk_hardcut)
-purpose: crash-safe exact-byte pod purchase and honest provider readback
-branch: agent/runpod-sdk-hardcut
-base: ee6dacfd34922b5ecd97c5cb3d07bcb21ab22116
-started: 2026-08-26
