@@ -44,19 +44,19 @@ type fault struct {
 type Server struct {
 	httpServer *httptest.Server
 
-	mu            sync.Mutex
-	nextID        int
-	pods          map[string]*runpod.Pod
-	volumes       map[string]*runpod.NetworkVolume
-	auths         map[string]*runpod.ContainerRegistryAuth
-	jobs          map[string]*fakeJob // key: endpointID + "/" + jobID
-	stockOut      map[string]bool     // GPU type ID -> out of stock
-	gpuTypes      []runpod.GPUType
-	lifecycle     map[string]*runpod.PodLifecycleObservation
-	accountID     string
-	clientBalance *float64
-	authz         []string
-	faults        []fault // queued one-shot injected responses
+	mu                      sync.Mutex
+	nextID                  int
+	pods                    map[string]*runpod.Pod
+	volumes                 map[string]*runpod.NetworkVolume
+	auths                   map[string]*runpod.ContainerRegistryAuth
+	jobs                    map[string]*fakeJob // key: endpointID + "/" + jobID
+	stockOut                map[string]bool     // GPU type ID -> out of stock
+	gpuTypes                []runpod.GPUType
+	lifecycle               map[string]*runpod.PodLifecycleObservation
+	accountID               string
+	clientBalanceUSDDecimal *string
+	authz                   []string
+	faults                  []fault // queued one-shot injected responses
 }
 
 type fakeJob struct {
@@ -70,16 +70,16 @@ type fakeJob struct {
 
 // New starts a fake RunPod server. Call Close when done.
 func New() *Server {
-	clientBalance := 100.0
+	clientBalance := "100"
 	s := &Server{
-		pods:          map[string]*runpod.Pod{},
-		volumes:       map[string]*runpod.NetworkVolume{},
-		auths:         map[string]*runpod.ContainerRegistryAuth{},
-		jobs:          map[string]*fakeJob{},
-		stockOut:      map[string]bool{},
-		lifecycle:     map[string]*runpod.PodLifecycleObservation{},
-		accountID:     "runpodtest-account",
-		clientBalance: &clientBalance,
+		pods:                    map[string]*runpod.Pod{},
+		volumes:                 map[string]*runpod.NetworkVolume{},
+		auths:                   map[string]*runpod.ContainerRegistryAuth{},
+		jobs:                    map[string]*fakeJob{},
+		stockOut:                map[string]bool{},
+		lifecycle:               map[string]*runpod.PodLifecycleObservation{},
+		accountID:               "runpodtest-account",
+		clientBalanceUSDDecimal: &clientBalance,
 	}
 	// Default GPU catalog for gpuTypes queries; override with SetGPUTypes.
 	for _, spec := range runpod.GPUCatalog() {
@@ -90,14 +90,18 @@ func New() *Server {
 			SecureCloud:    true,
 			CommunityCloud: spec.Consumer,
 			LowestPrice: &runpod.Price{
-				MinimumBidPrice:      0.10,
-				UninterruptablePrice: 0.30,
-				StockStatus:          "High",
+				MinimumBidPriceUSDMicrosPerHour: usdMicrosPerHourPointer(100_000),
+				OnDemandPriceUSDMicrosPerHour:   300_000,
+				StockStatus:                     "High",
 			},
 		})
 	}
 	s.httpServer = httptest.NewServer(http.HandlerFunc(s.handle))
 	return s
+}
+
+func usdMicrosPerHourPointer(value runpod.USDMicrosPerHour) *runpod.USDMicrosPerHour {
+	return &value
 }
 
 // URL returns the server's base URL (REST, serverless and GraphQL share it).
@@ -167,17 +171,17 @@ func (s *Server) SetAccountID(accountID string) {
 	s.accountID = accountID
 }
 
-// SetClientBalance changes the GraphQL clientBalance response. Pass nil to
-// exercise an omitted/null provider balance.
-func (s *Server) SetClientBalance(balance *float64) {
+// SetClientBalanceUSDDecimal changes the exact GraphQL clientBalance decimal.
+// Pass nil to exercise an omitted provider balance.
+func (s *Server) SetClientBalanceUSDDecimal(balance *string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if balance == nil {
-		s.clientBalance = nil
+		s.clientBalanceUSDDecimal = nil
 		return
 	}
 	copy := *balance
-	s.clientBalance = &copy
+	s.clientBalanceUSDDecimal = &copy
 }
 
 // AuthorizationHeaders returns the credentials observed by the fake in
@@ -693,9 +697,9 @@ func (s *Server) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	if strings.Contains(req.Query, "myself") {
 		s.mu.Lock()
 		accountID := s.accountID
-		var clientBalance *float64
-		if s.clientBalance != nil {
-			copy := *s.clientBalance
+		var clientBalance *string
+		if s.clientBalanceUSDDecimal != nil {
+			copy := *s.clientBalanceUSDDecimal
 			clientBalance = &copy
 		}
 		s.mu.Unlock()

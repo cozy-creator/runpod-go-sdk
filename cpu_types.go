@@ -1,7 +1,6 @@
 package runpod
 
 import (
-	"sort"
 	"strings"
 )
 
@@ -15,19 +14,18 @@ import (
 // `POST /v1/pods` with `cpuFlavorIds: [...]`. Catalog grows when RunPod adds
 // generations.
 type CPUFamily struct {
-	ID           string  // "cpu5c", "cpu3c", "cpu3g"
-	Family       string  // "compute" | "general"
-	IndicativeHr float64 // illustrative USD/hr at the cheapest size, ordering hint only
-	Description  string  // short human-readable note about the family
+	ID          string // "cpu5c", "cpu3c", "cpu3g"
+	Family      string // "compute" | "general"
+	Description string // short human-readable note about the family
 }
 
-// runpodCPUFamilyCatalog is the static catalog of known CPU families, ordered
-// roughly cheapest-first at the smallest instance size. Prices are illustrative
-// (live prices move); treat as ordering hints only.
+// runpodCPUFamilyCatalog is the static catalog of known CPU families in curated
+// fallback order. It carries no price: authoritative price must come from a
+// current provider observation.
 var runpodCPUFamilyCatalog = []CPUFamily{
-	{ID: "cpu5c", Family: "compute", IndicativeHr: 0.04, Description: "Intel Xeon Gold, 5th-gen compute-optimized"},
-	{ID: "cpu3c", Family: "compute", IndicativeHr: 0.06, Description: "older compute-optimized; 2GB RAM per vCPU"},
-	{ID: "cpu3g", Family: "general", IndicativeHr: 0.10, Description: "general-purpose; 4GB RAM per vCPU"},
+	{ID: "cpu5c", Family: "compute", Description: "Intel Xeon Gold, 5th-gen compute-optimized"},
+	{ID: "cpu3c", Family: "compute", Description: "older compute-optimized; 2GB RAM per vCPU"},
+	{ID: "cpu3g", Family: "general", Description: "general-purpose; 4GB RAM per vCPU"},
 }
 
 // CPUFamilies returns a copy of the known CPU family catalog. Stable ordering.
@@ -40,8 +38,8 @@ func CPUFamilies() []CPUFamily {
 }
 
 // SelectCPUFamilies returns a fallback-ordered list of family IDs suitable
-// for the REST `cpuFlavorIds` field. The list is sorted cheapest-first by the
-// catalog's indicative price.
+// for the REST `cpuFlavorIds` field. The list preserves curated catalog order;
+// it makes no price claim.
 //
 // `preferred` (optional) lets the caller push a specific family to the front
 // of the chain — useful when a workload has a known good family but should
@@ -63,10 +61,6 @@ func SelectCPUFamilies(preferred, familyFilter string) []string {
 		}
 		families = append(families, f)
 	}
-	sort.SliceStable(families, func(i, j int) bool {
-		return families[i].IndicativeHr < families[j].IndicativeHr
-	})
-
 	out := make([]string, 0, len(families))
 	seen := map[string]struct{}{}
 	push := func(id string) {

@@ -104,7 +104,7 @@ func (c *Client) ExecuteCreatePod(ctx context.Context, prepared []byte) (*Pod, e
 }
 
 // CreateSpotPod creates a spot/interruptible pod. The caller's request is
-// not mutated. Set req.BidPerGPU to bid above the market floor (see
+// not mutated. Set req.BidPerGPUUSDMicrosPerHour above the market floor (see
 // ListGPUOffers for current minimum bids); when zero RunPod bids the
 // current minimum.
 //
@@ -381,9 +381,9 @@ func (c *Client) validateCreatePodRequest(req *CreatePodRequest) error {
 	}
 
 	// Bid prices only make sense on interruptible (spot) pods.
-	if req.BidPerGPU != 0 {
-		if err := c.validatePositiveFloat("bidPerGpu", req.BidPerGPU); err != nil {
-			return err
+	if req.BidPerGPUUSDMicrosPerHour != 0 {
+		if req.BidPerGPUUSDMicrosPerHour < 0 {
+			return NewValidationErrorWithValue("bidPerGpu", "must be positive", req.BidPerGPUUSDMicrosPerHour)
 		}
 		if !req.Interruptible {
 			return NewValidationError("bidPerGpu", "requires interruptible=true (spot pods)")

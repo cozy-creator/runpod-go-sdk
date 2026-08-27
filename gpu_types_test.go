@@ -114,6 +114,7 @@ func TestListAvailableGPUs_OnlyAvailable(t *testing.T) {
 						"secureCloud":    true,
 						"communityCloud": false,
 						"lowestPrice": map[string]interface{}{
+							"minimumBidPrice":      0.45,
 							"uninterruptablePrice": 0.90,
 							"stockStatus":          "AVAILABLE",
 						},
@@ -125,6 +126,7 @@ func TestListAvailableGPUs_OnlyAvailable(t *testing.T) {
 						"secureCloud":    true,
 						"communityCloud": false,
 						"lowestPrice": map[string]interface{}{
+							"minimumBidPrice":      0.40,
 							"uninterruptablePrice": 0.80,
 							"stockStatus":          "OUT_OF_STOCK",
 						},
@@ -136,6 +138,7 @@ func TestListAvailableGPUs_OnlyAvailable(t *testing.T) {
 						"secureCloud":    true,
 						"communityCloud": false,
 						"lowestPrice": map[string]interface{}{
+							"minimumBidPrice":      0.35,
 							"uninterruptablePrice": 0.70,
 							"stockStatus":          "LOW",
 						},
@@ -147,6 +150,7 @@ func TestListAvailableGPUs_OnlyAvailable(t *testing.T) {
 						"secureCloud":    true,
 						"communityCloud": false,
 						"lowestPrice": map[string]interface{}{
+							"minimumBidPrice":      0.55,
 							"uninterruptablePrice": 1.10,
 							"stockStatus":          "Medium",
 							"availableGpuCounts":   []int{1, 2},
@@ -159,6 +163,7 @@ func TestListAvailableGPUs_OnlyAvailable(t *testing.T) {
 						"secureCloud":    true,
 						"communityCloud": false,
 						"lowestPrice": map[string]interface{}{
+							"minimumBidPrice":      0.25,
 							"uninterruptablePrice": 0.50,
 							"stockStatus":          "None",
 						},
@@ -199,6 +204,7 @@ func TestGetGPUType(t *testing.T) {
 						"secureCloud":    true,
 						"communityCloud": false,
 						"lowestPrice": map[string]interface{}{
+							"minimumBidPrice":      0.61,
 							"uninterruptablePrice": 1.23,
 							"stockStatus":          "AVAILABLE",
 						},

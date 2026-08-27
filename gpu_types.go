@@ -96,10 +96,10 @@ func (c *Client) ListAvailableGPUs(ctx context.Context, minCudaVersion string, g
 		if right == nil {
 			return true
 		}
-		if left.UninterruptablePrice == right.UninterruptablePrice {
+		if left.OnDemandPriceUSDMicrosPerHour == right.OnDemandPriceUSDMicrosPerHour {
 			return out[i].DisplayName < out[j].DisplayName
 		}
-		return left.UninterruptablePrice < right.UninterruptablePrice
+		return left.OnDemandPriceUSDMicrosPerHour < right.OnDemandPriceUSDMicrosPerHour
 	})
 
 	return out, nil

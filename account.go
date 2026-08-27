@@ -2,6 +2,7 @@ package runpod
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -29,13 +30,13 @@ func (c *Client) GetAccountID(ctx context.Context) (string, error) {
 	return accountID, nil
 }
 
-// GetClientBalance returns the balance reported for the authenticated RunPod
-// account. A real zero is returned as zero; an omitted/null field or omitted
-// account is refused rather than silently becoming zero.
-func (c *Client) GetClientBalance(ctx context.Context) (float64, error) {
+// GetClientBalanceUSDMicros returns RunPod's balance as exact integer USD
+// micros. An omitted/null field or account, sub-micro value, or overflow is
+// refused rather than silently becoming zero or rounding.
+func (c *Client) GetClientBalanceUSDMicros(ctx context.Context) (int64, error) {
 	var result struct {
 		Myself *struct {
-			ClientBalance *float64 `json:"clientBalance"`
+			ClientBalance json.RawMessage `json:"clientBalance"`
 		} `json:"myself"`
 	}
 	if err := c.GraphQL(ctx, clientBalanceQuery, nil, &result); err != nil {
@@ -44,8 +45,12 @@ func (c *Client) GetClientBalance(ctx context.Context) (float64, error) {
 	if result.Myself == nil {
 		return 0, fmt.Errorf("get RunPod client balance: response omitted myself")
 	}
-	if result.Myself.ClientBalance == nil {
+	if len(result.Myself.ClientBalance) == 0 || strings.TrimSpace(string(result.Myself.ClientBalance)) == "null" {
 		return 0, fmt.Errorf("get RunPod client balance: response omitted myself.clientBalance")
 	}
-	return *result.Myself.ClientBalance, nil
+	micros, err := parseJSONUSDMicros(result.Myself.ClientBalance)
+	if err != nil {
+		return 0, fmt.Errorf("get RunPod client balance: %w", err)
+	}
+	return micros, nil
 }

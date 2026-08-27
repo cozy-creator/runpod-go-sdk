@@ -266,15 +266,15 @@ func TestClientBalancePreservesZeroAndRefusesAbsence(t *testing.T) {
 	defer srv.Close()
 	client := srv.MustClient()
 
-	zero := 0.0
-	srv.SetClientBalance(&zero)
-	got, err := client.GetClientBalance(context.Background())
+	zero := "0"
+	srv.SetClientBalanceUSDDecimal(&zero)
+	got, err := client.GetClientBalanceUSDMicros(context.Background())
 	if err != nil || got != 0 {
 		t.Fatalf("present zero balance = %v, %v; want 0, nil", got, err)
 	}
 
-	srv.SetClientBalance(nil)
-	if _, err := client.GetClientBalance(context.Background()); err == nil {
+	srv.SetClientBalanceUSDDecimal(nil)
+	if _, err := client.GetClientBalanceUSDMicros(context.Background()); err == nil {
 		t.Fatal("omitted clientBalance must be refused, not decoded as zero")
 	}
 }

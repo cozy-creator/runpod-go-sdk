@@ -124,12 +124,14 @@ func TestGetPodGPUCountNormalization(t *testing.T) {
 
 func TestListPodsNormalizesNestedGPUCountInBothWireShapes(t *testing.T) {
 	tests := []struct {
-		name        string
-		body        string
-		costPresent bool
+		name          string
+		body          string
+		costUSDMicros *runpod.USDMicrosPerHour
 	}{
 		{name: "legacy wrapper compatibility", body: `{"pods":[{"id":"pod-1","gpu":{"count":2}}]}`},
-		{name: "documented bare array with explicit zero price", body: `[{"id":"pod-1","gpu":{"count":2},"costPerHr":0}]`, costPresent: true},
+		{name: "explicit null price", body: `[{"id":"pod-1","gpu":{"count":2},"costPerHr":null}]`},
+		{name: "bare number price", body: `[{"id":"pod-1","gpu":{"count":2},"costPerHr":0.123456}]`, costUSDMicros: usdRatePointer(123456)},
+		{name: "quoted decimal price", body: `[{"id":"pod-1","gpu":{"count":2},"costPerHr":"0.74"}]`, costUSDMicros: usdRatePointer(740000)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -150,8 +152,29 @@ func TestListPodsNormalizesNestedGPUCountInBothWireShapes(t *testing.T) {
 			if len(pods) != 1 || pods[0].GPUCount != 2 {
 				t.Fatalf("normalized pods = %+v, want one pod with count 2", pods)
 			}
-			if pods[0].CostPerHourPresent != test.costPresent {
-				t.Fatalf("CostPerHourPresent = %t, want %t for %s", pods[0].CostPerHourPresent, test.costPresent, test.body)
+			if test.costUSDMicros == nil {
+				if pods[0].ListPriceUSDMicrosPerHour != nil {
+					t.Fatalf("ListPriceUSDMicrosPerHour = %d, want nil for %s", *pods[0].ListPriceUSDMicrosPerHour, test.body)
+				}
+			} else if pods[0].ListPriceUSDMicrosPerHour == nil || *pods[0].ListPriceUSDMicrosPerHour != *test.costUSDMicros {
+				t.Fatalf("ListPriceUSDMicrosPerHour = %v, want %d for %s", pods[0].ListPriceUSDMicrosPerHour, *test.costUSDMicros, test.body)
+			}
+		})
+	}
+}
+
+func usdRatePointer(value runpod.USDMicrosPerHour) *runpod.USDMicrosPerHour { return &value }
+
+func TestListPodsRefusesSubMicroPrice(t *testing.T) {
+	for _, price := range []string{`0.0000001`, `-0.01`} {
+		t.Run(price, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				fmt.Fprintf(w, `[{"id":"pod-1","costPerHr":%s}]`, price)
+			}))
+			defer server.Close()
+			client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL))
+			if _, err := client.ListPods(context.Background(), nil); err == nil {
+				t.Fatalf("invalid provider list price %s must refuse", price)
 			}
 		})
 	}

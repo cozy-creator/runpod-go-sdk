@@ -18,17 +18,31 @@ type GPUOffer struct {
 	// GPUCount is the whole-pod count used to obtain both prices below.
 	GPUCount    int
 	StockStatus string
-	// OnDemandPrice is the uninterruptible USD/hr price.
-	OnDemandPrice float64
-	// MinimumBidPrice is the aggregate spot-market floor for GPUCount GPUs.
-	// REST CreatePodRequest.BidPerGPU expects a per-GPU number, so callers
-	// must divide this value by GPUCount before using it there. RunPod no longer
-	// reports a separate interruptible/spot price on LowestPrice — this
-	// floor is the only spot pricing signal exposed.
-	MinimumBidPrice float64
+	// OnDemandPriceUSDMicrosPerHour is the aggregate uninterruptible list-price
+	// rate for GPUCount GPUs.
+	OnDemandPriceUSDMicrosPerHour USDMicrosPerHour
+	// MinimumBidPriceUSDMicrosPerHour is the optional aggregate spot-market
+	// floor for GPUCount GPUs. It is not directly executable as a per-GPU bid;
+	// use MinimumBidPerGPUUSDMicrosPerHour for a ceil-safe conversion.
+	MinimumBidPriceUSDMicrosPerHour *USDMicrosPerHour
 	// AvailableGPUCounts is the set of whole-pod GPU counts currently
 	// reported for this exact GPU type/cloud price surface.
 	AvailableGPUCounts []int
+}
+
+// MinimumBidPerGPUUSDMicrosPerHour converts RunPod's aggregate floor to the
+// per-GPU rate expected by CreatePodRequest without ever bidding below it.
+func (o GPUOffer) MinimumBidPerGPUUSDMicrosPerHour() (USDMicrosPerHour, bool) {
+	if o.MinimumBidPriceUSDMicrosPerHour == nil || o.GPUCount <= 0 {
+		return 0, false
+	}
+	aggregate := int64(*o.MinimumBidPriceUSDMicrosPerHour)
+	count := int64(o.GPUCount)
+	perGPU := aggregate / count
+	if aggregate%count != 0 {
+		perGPU++
+	}
+	return USDMicrosPerHour(perGPU), true
 }
 
 // GPUOfferFilter constrains ListGPUOffers. Zero value = all offers for one
@@ -68,7 +82,7 @@ type graphQLGPUOfferPayload struct {
 // ListGPUOffers returns per-(GPU type x cloud) stock and pricing in one
 // call, sorted by on-demand price ascending. This is the placement-decision
 // view that connects the catalog to pod creation: pick an offer, then set
-// GPUTypeIDs/CloudType/DataCenterIDs (and a per-GPU BidPerGPU for spot) on
+// GPUTypeIDs/CloudType/DataCenterIDs (and an exact per-GPU bid for spot) on
 // the CreatePodRequest.
 func (c *Client) ListGPUOffers(ctx context.Context, filter *GPUOfferFilter) ([]GPUOffer, error) {
 	gpuCount := 1
@@ -157,15 +171,15 @@ query($gpuCount: Int!, $minCudaVersion: String, $allowedCudaVersions: [String], 
 				return
 			}
 			offers = append(offers, GPUOffer{
-				GPUTypeID:          gpu.ID,
-				DisplayName:        gpu.DisplayName,
-				MemoryInGB:         gpu.MemoryInGB,
-				CloudType:          cloud,
-				GPUCount:           gpuCount,
-				StockStatus:        status,
-				OnDemandPrice:      price.UninterruptablePrice,
-				MinimumBidPrice:    price.MinimumBidPrice,
-				AvailableGPUCounts: append([]int(nil), price.AvailableGPUCounts...),
+				GPUTypeID:                       gpu.ID,
+				DisplayName:                     gpu.DisplayName,
+				MemoryInGB:                      gpu.MemoryInGB,
+				CloudType:                       cloud,
+				GPUCount:                        gpuCount,
+				StockStatus:                     status,
+				OnDemandPriceUSDMicrosPerHour:   price.OnDemandPriceUSDMicrosPerHour,
+				MinimumBidPriceUSDMicrosPerHour: price.MinimumBidPriceUSDMicrosPerHour,
+				AvailableGPUCounts:              append([]int(nil), price.AvailableGPUCounts...),
 			})
 		}
 		if gpu.SecureCloud {
@@ -177,10 +191,10 @@ query($gpuCount: Int!, $minCudaVersion: String, $allowedCudaVersions: [String], 
 	}
 
 	sort.SliceStable(offers, func(i, j int) bool {
-		if offers[i].OnDemandPrice == offers[j].OnDemandPrice {
+		if offers[i].OnDemandPriceUSDMicrosPerHour == offers[j].OnDemandPriceUSDMicrosPerHour {
 			return offers[i].DisplayName < offers[j].DisplayName
 		}
-		return offers[i].OnDemandPrice < offers[j].OnDemandPrice
+		return offers[i].OnDemandPriceUSDMicrosPerHour < offers[j].OnDemandPriceUSDMicrosPerHour
 	})
 
 	return offers, nil
