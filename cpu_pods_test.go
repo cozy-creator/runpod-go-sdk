@@ -261,7 +261,7 @@ func TestSelectCPUFamilies_NoFilter(t *testing.T) {
 		t.Fatalf("expected non-empty fallback chain")
 	}
 	if got[0] != "cpu5c" {
-		t.Errorf("expected cpu5c (cheapest) first, got %q", got[0])
+		t.Errorf("expected current-generation cpu5c first, got %q", got[0])
 	}
 }
 
