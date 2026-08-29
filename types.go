@@ -224,10 +224,11 @@ type CreatePodRequest struct {
 	MinRAMPerGPU  int `json:"minRAMPerGPU,omitempty"`  // GB
 	MinVCPUPerGPU int `json:"minVCPUPerGPU,omitempty"` // virtual CPUs
 
-	// CPU placement (ComputeType="CPU"). CPUFlavorIDs is a fallback-ordered
-	// list of acceptable CPU family IDs (e.g., "cpu5c", "cpu3c", "cpu3g");
-	// RunPod picks the first available. Optional — if omitted, RunPod
-	// auto-selects the cheapest available CPU flavor. Family IDs are the
+	// CPU placement (ComputeType="CPU"). CPUFlavorIDs is a list of acceptable
+	// CPU family IDs (e.g., "cpu5c", "cpu3c", "cpu3g").
+	// families. CPUFlavorPriority="availability" lets RunPod choose from current
+	// stock; "custom" makes list order authoritative. Optional — if omitted,
+	// RunPod auto-selects the cheapest available CPU flavor. Family IDs are the
 	// REST API's vocabulary; the older GraphQL CPU mutation used granular
 	// IDs (`cpu5c-2-2`) but REST accepts only family-level IDs.
 	//
@@ -235,7 +236,8 @@ type CreatePodRequest struct {
 	// To target a specific vCPU/memory size, pick families from the static
 	// catalog (see cpu_types.go) — but be aware RunPod within a family will
 	// still pick the cheapest instance size it has stock for.
-	CPUFlavorIDs []string `json:"cpuFlavorIds,omitempty"`
+	CPUFlavorIDs      []string `json:"cpuFlavorIds,omitempty"`
+	CPUFlavorPriority string   `json:"cpuFlavorPriority,omitempty"`
 
 	VCPUCount         int               `json:"vcpuCount,omitempty"`
 	ContainerDiskInGB int               `json:"containerDiskInGb"`
@@ -265,6 +267,11 @@ type CreatePodRequest struct {
 	GPUTypePriority    string   `json:"gpuTypePriority,omitempty"`
 	DataCenterPriority string   `json:"dataCenterPriority,omitempty"`
 }
+
+const (
+	CPUFlavorPriorityAvailability = "availability"
+	CPUFlavorPriorityCustom       = "custom"
+)
 
 const (
 	CudaVersion118 = "11.8"

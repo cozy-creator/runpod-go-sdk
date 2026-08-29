@@ -1,6 +1,7 @@
 package runpod
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -94,9 +95,61 @@ func TestValidateCreatePodRequest_CPU_AllowsFlavorIDs(t *testing.T) {
 		ContainerDiskInGB: 10,
 		ComputeType:       "CPU",
 		CPUFlavorIDs:      []string{"cpu5c", "cpu3c"},
+		CPUFlavorPriority: CPUFlavorPriorityCustom,
 	}
 	if err := c.validateCreatePodRequest(req); err != nil {
 		t.Fatalf("CPU pod with cpuFlavorIds should pass, got: %v", err)
+	}
+}
+
+func TestPrepareCreatePod_CPUFlavorPriorityRoundTrips(t *testing.T) {
+	c := newValidationClient()
+	prepared, err := c.PrepareCreatePod(&CreatePodRequest{
+		Name: "n", ImageName: "img", ContainerDiskInGB: 10, ComputeType: "CPU",
+		CPUFlavorIDs: []string{"cpu5c", "cpu3c"}, CPUFlavorPriority: CPUFlavorPriorityCustom,
+		VCPUCount: 2,
+	})
+	if err != nil {
+		t.Fatalf("PrepareCreatePod: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(prepared, &wire); err != nil {
+		t.Fatalf("decode prepared create: %v", err)
+	}
+	if wire["cpuFlavorPriority"] != CPUFlavorPriorityCustom {
+		t.Fatalf("cpuFlavorPriority = %#v", wire["cpuFlavorPriority"])
+	}
+	if _, present := wire["gpuCount"]; present {
+		t.Fatalf("CPU create carries gpuCount: %s", prepared)
+	}
+	inspected, err := c.InspectPreparedCreatePod(prepared)
+	if err != nil || inspected.CPUFlavorPriority != CPUFlavorPriorityCustom || inspected.VCPUCount != 2 {
+		t.Fatalf("InspectPreparedCreatePod = %+v, %v", inspected, err)
+	}
+}
+
+func TestValidateCreatePodRequest_CPUFlavorPriority(t *testing.T) {
+	c := newValidationClient()
+	for name, req := range map[string]*CreatePodRequest{
+		"unknown": {
+			Name: "n", ImageName: "img", ContainerDiskInGB: 10, ComputeType: "CPU",
+			CPUFlavorPriority: "cheapest",
+		},
+		"custom without flavors": {
+			Name: "n", ImageName: "img", ContainerDiskInGB: 10, ComputeType: "CPU",
+			CPUFlavorPriority: CPUFlavorPriorityCustom,
+		},
+		"priority on GPU": {
+			Name: "n", ImageName: "img", ContainerDiskInGB: 10, ComputeType: "GPU",
+			GPUTypeIDs: []string{"gpu"}, GPUCount: 1,
+			CPUFlavorPriority: CPUFlavorPriorityAvailability,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := c.validateCreatePodRequest(req); err == nil {
+				t.Fatal("expected CPU flavor priority refusal")
+			}
+		})
 	}
 }
 
@@ -208,7 +261,22 @@ func TestSelectCPUFamilies_NoFilter(t *testing.T) {
 		t.Fatalf("expected non-empty fallback chain")
 	}
 	if got[0] != "cpu5c" {
-		t.Errorf("expected cpu5c (cheapest) first, got %q", got[0])
+		t.Errorf("expected current-generation cpu5c first, got %q", got[0])
+	}
+}
+
+func TestCPUFamilies_CurrentRESTVocabulary(t *testing.T) {
+	want := []string{"cpu5c", "cpu5g", "cpu5m", "cpu3c", "cpu3g", "cpu3m"}
+	families := CPUFamilies()
+	got := make([]string, len(families))
+	for i, family := range families {
+		got[i] = family.ID
+		if resolved, ok := CPUFamilyByID(family.ID); !ok || resolved != family {
+			t.Fatalf("CPUFamilyByID(%q) = %+v, %t", family.ID, resolved, ok)
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("CPU family catalog = %v, want %v", got, want)
 	}
 }
 

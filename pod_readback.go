@@ -73,6 +73,7 @@ type PodGraphQLSnapshot struct {
 	LastStartedAt                *JSONTime              `json:"lastStartedAt"`
 	ImageName                    string                 `json:"imageName"`
 	GPUCount                     int                    `json:"gpuCount"`
+	CPUFlavorID                  string                 `json:"cpuFlavorId"`
 	MachineID                    string                 `json:"machineId"`
 	MemoryInGB                   float64                `json:"memoryInGb"`
 	VCPUCount                    float64                `json:"vcpuCount"`
@@ -230,6 +231,7 @@ func (c *Client) getPodGraphQLSnapshot(ctx context.Context, podID string) (*PodG
     lastStartedAt
     imageName
     gpuCount
+    cpuFlavorId
     machineId
     memoryInGb
     vcpuCount
@@ -293,6 +295,13 @@ func buildPodReadbackChecks(rest *Pod, graphQL *PodGraphQLSnapshot) []PodReadbac
 		compareText("requested_ports", normalizeRESTPorts(rest.Ports), normalizeGraphQLPorts(graphQL.RequestedPorts), false),
 		compareInt("gpu_count", rest.GPUCount, graphQL.GPUCount),
 		compareRate("list_price_usd_micros_per_hour", rest.ListPriceUSDMicrosPerHour, graphQL.CostUSDMicrosPerHour),
+	}
+	if strings.TrimSpace(rest.CPUFlavorID) != "" || strings.TrimSpace(graphQL.CPUFlavorID) != "" {
+		checks = append(checks,
+			compareText("cpu_flavor_id", rest.CPUFlavorID, graphQL.CPUFlavorID, false),
+			comparePositiveIntFloat("vcpu_count", rest.VCPUCount, graphQL.VCPUCount),
+			comparePositiveIntFloat("memory_in_gb", rest.MemoryInGB, graphQL.MemoryInGB),
+		)
 	}
 
 	if graphQL.Runtime == nil {
@@ -386,6 +395,27 @@ func compareTimes(field string, rest, graphQL *JSONTime) PodReadbackCheck {
 
 func compareInt(field string, rest, graphQL int) PodReadbackCheck {
 	return compareText(field, strconv.Itoa(rest), strconv.Itoa(graphQL), true)
+}
+
+func comparePositiveIntFloat(field string, rest int, graphQL float64) PodReadbackCheck {
+	check := PodReadbackCheck{Field: field, RESTValue: strconv.Itoa(rest),
+		GraphQLValue: strconv.FormatFloat(graphQL, 'f', -1, 64)}
+	if rest <= 0 || graphQL <= 0 {
+		check.Status = PodReadbackCheckNotComparable
+		check.Detail = "one or both sources omitted the positive CPU resource fact"
+		return check
+	}
+	if graphQL != float64(int64(graphQL)) {
+		check.Status = PodReadbackCheckInvalid
+		check.Detail = "GraphQL CPU resource fact is not an integer"
+		return check
+	}
+	if int64(rest) == int64(graphQL) {
+		check.Status = PodReadbackCheckAgree
+	} else {
+		check.Status = PodReadbackCheckDisagree
+	}
+	return check
 }
 
 func compareRate(field string, rest, graphQL *USDMicrosPerHour) PodReadbackCheck {

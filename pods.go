@@ -344,6 +344,15 @@ func (c *Client) validateCreatePodRequest(req *CreatePodRequest) error {
 		if req.MinVCPUPerGPU != 0 {
 			return NewValidationError("minVCPUPerGPU", "must not be set when computeType is CPU")
 		}
+		switch req.CPUFlavorPriority {
+		case "", CPUFlavorPriorityAvailability:
+		case CPUFlavorPriorityCustom:
+			if len(req.CPUFlavorIDs) == 0 {
+				return NewValidationError("cpuFlavorIds", "must not be empty when cpuFlavorPriority is custom")
+			}
+		default:
+			return NewValidationErrorWithValue("cpuFlavorPriority", "must be either 'availability' or 'custom'", req.CPUFlavorPriority)
+		}
 	} else {
 		// GPU is the historical default; require the GPU selector + count.
 		if err := c.validateRequired("gpuTypeId", req.GPUTypeIDs); err != nil {
@@ -354,6 +363,9 @@ func (c *Client) validateCreatePodRequest(req *CreatePodRequest) error {
 		}
 		if len(req.CPUFlavorIDs) > 0 {
 			return NewValidationError("cpuFlavorIds", "must not be set unless computeType is CPU")
+		}
+		if req.CPUFlavorPriority != "" {
+			return NewValidationError("cpuFlavorPriority", "must not be set unless computeType is CPU")
 		}
 		if req.MinRAMPerGPU != 0 {
 			if err := c.validatePositive("minRAMPerGPU", req.MinRAMPerGPU); err != nil {
