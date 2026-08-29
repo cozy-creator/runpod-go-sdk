@@ -14,8 +14,8 @@ import (
 // `POST /v1/pods` with `cpuFlavorIds: [...]`. Catalog grows when RunPod adds
 // generations.
 type CPUFamily struct {
-	ID          string // "cpu5c", "cpu3c", "cpu3g"
-	Family      string // "compute" | "general"
+	ID          string // "cpu5c", "cpu5g", "cpu5m", "cpu3c", "cpu3g", "cpu3m"
+	Family      string // "compute" | "general" | "memory"
 	Description string // short human-readable note about the family
 }
 
@@ -24,8 +24,11 @@ type CPUFamily struct {
 // current provider observation.
 var runpodCPUFamilyCatalog = []CPUFamily{
 	{ID: "cpu5c", Family: "compute", Description: "Intel Xeon Gold, 5th-gen compute-optimized"},
+	{ID: "cpu5g", Family: "general", Description: "5th-gen general-purpose"},
+	{ID: "cpu5m", Family: "memory", Description: "5th-gen memory-optimized"},
 	{ID: "cpu3c", Family: "compute", Description: "older compute-optimized; 2GB RAM per vCPU"},
 	{ID: "cpu3g", Family: "general", Description: "general-purpose; 4GB RAM per vCPU"},
+	{ID: "cpu3m", Family: "memory", Description: "3rd-gen memory-optimized"},
 }
 
 // CPUFamilies returns a copy of the known CPU family catalog. Stable ordering.
@@ -35,6 +38,17 @@ func CPUFamilies() []CPUFamily {
 	out := make([]CPUFamily, len(runpodCPUFamilyCatalog))
 	copy(out, runpodCPUFamilyCatalog)
 	return out
+}
+
+// CPUFamilyByID returns one exact known REST CPU family.
+func CPUFamilyByID(id string) (CPUFamily, bool) {
+	id = strings.TrimSpace(id)
+	for _, family := range runpodCPUFamilyCatalog {
+		if family.ID == id {
+			return family, true
+		}
+	}
+	return CPUFamily{}, false
 }
 
 // SelectCPUFamilies returns a fallback-ordered list of family IDs suitable
@@ -47,7 +61,7 @@ func CPUFamilies() []CPUFamily {
 // for no preference.
 //
 // `familyFilter` (optional) restricts the result to only families matching
-// "compute" or "general"; pass an empty string for no filter.
+// "compute", "general", or "memory"; pass an empty string for no filter.
 //
 // Returns an empty slice when no family in the catalog matches the filter.
 // RunPod then auto-picks any available CPU when the caller passes `nil` /
