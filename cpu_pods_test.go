@@ -255,6 +255,22 @@ func TestValidateCreatePodRequest_GPUResourceMinima(t *testing.T) {
 	}
 }
 
+func TestValidateCreatePodRequestDownloadFloor(t *testing.T) {
+	c := newValidationClient()
+	req := CreatePodRequest{
+		Name: "n", ImageName: "img", ContainerDiskInGB: 10,
+		GPUTypeIDs: []string{"NVIDIA GeForce RTX 4090"}, GPUCount: 1,
+		MinDownloadMbps: 2000,
+	}
+	if err := c.validateCreatePodRequest(&req); err != nil {
+		t.Fatalf("positive download floor should pass validation: %v", err)
+	}
+	req.MinDownloadMbps = -1
+	if err := c.validateCreatePodRequest(&req); err == nil || !strings.Contains(err.Error(), "minDownloadMbps") {
+		t.Fatalf("expected minDownloadMbps validation error, got %v", err)
+	}
+}
+
 func TestSelectCPUFamilies_NoFilter(t *testing.T) {
 	got := SelectCPUFamilies("", "")
 	if len(got) == 0 {
