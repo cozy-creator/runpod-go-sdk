@@ -394,6 +394,9 @@ func (c *Client) validateCreatePodRequest(req *CreatePodRequest) error {
 			return err
 		}
 	}
+	if req.MinDownloadMbps < 0 {
+		return NewValidationErrorWithValue("minDownloadMbps", "cannot be negative", req.MinDownloadMbps)
+	}
 
 	// Bid prices only make sense on interruptible (spot) pods.
 	if req.BidPerGPUUSDMicrosPerHour != 0 {

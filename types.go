@@ -223,6 +223,9 @@ type CreatePodRequest struct {
 	// defaults in effect.
 	MinRAMPerGPU  int `json:"minRAMPerGPU,omitempty"`  // GB
 	MinVCPUPerGPU int `json:"minVCPUPerGPU,omitempty"` // virtual CPUs
+	// MinDownloadMbps filters placement to hosts whose advertised download
+	// bandwidth meets this floor. Zero leaves RunPod's default in effect.
+	MinDownloadMbps int `json:"minDownloadMbps,omitempty"`
 
 	// CPU placement (ComputeType="CPU"). CPUFlavorIDs is a list of acceptable
 	// CPU family IDs (e.g., "cpu5c", "cpu3c", "cpu3g").

@@ -124,3 +124,39 @@ func TestCreatePodGPUResourceMinimaWireFormat(t *testing.T) {
 		t.Fatalf("got %d requests, want 2", requestNumber)
 	}
 }
+
+func TestCreatePodDownloadFloorWireFormat(t *testing.T) {
+	requestNumber := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestNumber++
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if requestNumber == 1 && body["minDownloadMbps"] != float64(2000) {
+			t.Errorf("minDownloadMbps = %v, want 2000", body["minDownloadMbps"])
+		}
+		if requestNumber == 2 {
+			if _, ok := body["minDownloadMbps"]; ok {
+				t.Errorf("zero minDownloadMbps must be omitted: %v", body)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"pod-1","desiredStatus":"RUNNING"}`))
+	}))
+	defer server.Close()
+
+	client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL))
+	base := runpod.CreatePodRequest{
+		Name: "n", ImageName: "img", GPUTypeIDs: []string{"NVIDIA GeForce RTX 4090"},
+		GPUCount: 1, ContainerDiskInGB: 10,
+	}
+	withFloor := base
+	withFloor.MinDownloadMbps = 2000
+	if _, err := client.CreatePod(context.Background(), &withFloor); err != nil {
+		t.Fatalf("CreatePod with floor: %v", err)
+	}
+	if _, err := client.CreatePod(context.Background(), &base); err != nil {
+		t.Fatalf("CreatePod without floor: %v", err)
+	}
+}
