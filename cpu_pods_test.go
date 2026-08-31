@@ -255,12 +255,13 @@ func TestValidateCreatePodRequest_GPUResourceMinima(t *testing.T) {
 	}
 }
 
-func TestValidateCreatePodRequestDownloadFloor(t *testing.T) {
+func TestValidateCreatePodRequestBandwidthFloors(t *testing.T) {
 	c := newValidationClient()
 	req := CreatePodRequest{
 		Name: "n", ImageName: "img", ContainerDiskInGB: 10,
 		GPUTypeIDs: []string{"NVIDIA GeForce RTX 4090"}, GPUCount: 1,
 		MinDownloadMbps: 2000,
+		MinUploadMbps:   1000,
 	}
 	if err := c.validateCreatePodRequest(&req); err != nil {
 		t.Fatalf("positive download floor should pass validation: %v", err)
@@ -268,6 +269,11 @@ func TestValidateCreatePodRequestDownloadFloor(t *testing.T) {
 	req.MinDownloadMbps = -1
 	if err := c.validateCreatePodRequest(&req); err == nil || !strings.Contains(err.Error(), "minDownloadMbps") {
 		t.Fatalf("expected minDownloadMbps validation error, got %v", err)
+	}
+	req.MinDownloadMbps = 2000
+	req.MinUploadMbps = -1
+	if err := c.validateCreatePodRequest(&req); err == nil || !strings.Contains(err.Error(), "minUploadMbps") {
+		t.Fatalf("expected minUploadMbps validation error, got %v", err)
 	}
 }
 
