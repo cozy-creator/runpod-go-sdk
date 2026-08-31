@@ -51,6 +51,33 @@ func TestGetCPUOffer(t *testing.T) {
 	}
 }
 
+func TestGetCPUOfferPreservesPricedUnknownStock(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Live RunPod shape observed on 2026-08-31: securePrice was exact while
+		// stockStatus was omitted.
+		fmt.Fprint(w, `{"data":{"cpuFlavors":[
+			{"id":"cpu5c","displayName":"Compute-Optimized","minVcpu":2,"maxVcpu":32,
+			 "ramMultiplier":2,"specifics":{"securePrice":0.07}}
+		]}}`)
+	}))
+	defer server.Close()
+
+	client, err := NewClient("test-key", WithGraphQLBaseURL(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	offer, err := client.GetCPUOffer(t.Context(), CPUOfferRequest{
+		InstanceID: "cpu5c-2-4", DataCenterID: "EU-RO-1",
+	})
+	if err != nil {
+		t.Fatalf("GetCPUOffer: %v", err)
+	}
+	if offer.StockStatus != CPUStockStatusUnknown || offer.OnDemandPriceUSDMicrosPerHour != 70_000 {
+		t.Fatalf("CPU offer = %+v", offer)
+	}
+}
+
 func TestGetCPUOfferRefusesInexactPrice(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
