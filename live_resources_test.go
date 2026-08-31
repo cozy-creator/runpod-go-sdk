@@ -112,7 +112,7 @@ func TestSpotPodReclaimLive(t *testing.T) {
 
 	pod, err := client.CreateSpotPod(ctx, &runpod.CreatePodRequest{
 		Name:                      "sdk-live-spot-test",
-		ImageName:                 "runpod/base:0.6.2-cuda12.4.1",
+		ImageName:                 "tensorhub/worker:torch2.13.0-cu130-cp314-linux-x86",
 		GPUTypeIDs:                []string{offer.GPUTypeID},
 		GPUCount:                  1,
 		ContainerDiskInGB:         10,
