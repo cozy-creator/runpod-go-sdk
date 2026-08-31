@@ -10,6 +10,11 @@ import (
 
 var cpuInstanceIDPattern = regexp.MustCompile(`^(cpu[0-9]+[cgm])-([1-9][0-9]*)-([1-9][0-9]*)$`)
 
+// CPUStockStatusUnknown means RunPod returned an exact secure price but
+// omitted stockStatus. Callers may attempt a create; that create remains the
+// capacity authority.
+const CPUStockStatusUnknown = "Unknown"
+
 // CPUOfferRequest identifies one exact RunPod CPU instance shape in one data center.
 // InstanceID uses RunPod's family-vCPU-RAM spelling, for example cpu5c-2-4.
 type CPUOfferRequest struct {
@@ -97,7 +102,7 @@ query($instanceId: String!, $dataCenterId: String!) {
 		}
 		stock := strings.TrimSpace(flavor.Specifics.StockStatus)
 		if stock == "" {
-			return out, fmt.Errorf("RunPod CPU offer %s in %s has no stock status", instanceID, dataCenterID)
+			stock = CPUStockStatusUnknown
 		}
 		if (flavor.MinVCPU > 0 && float64(vcpu) < flavor.MinVCPU) ||
 			(flavor.MaxVCPU > 0 && vcpu > flavor.MaxVCPU) {
