@@ -1,0 +1,4 @@
+owner: codex /root
+purpose: align SDK examples and live proof with the official CPython 3.12 base worker image
+branch: codex/cp312-image
+base: 08cbbebb1fea2f76ae34062dd4802e9a222f7887

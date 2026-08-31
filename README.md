@@ -18,7 +18,7 @@ if err != nil {
 
 pod, err := client.CreatePod(ctx, &runpod.CreatePodRequest{
     Name:              "worker-1",
-    ImageName:         "tensorhub/worker:torch2.13.0-cu130-cp314-linux-x86",
+    ImageName:         "tensorhub/worker:torch2.13.0-cu130-cp312-linux-x86",
     GPUTypeIDs:        []string{"NVIDIA GeForce RTX 4090", "NVIDIA GeForce RTX 3090"},
     GPUCount:          1,
     ContainerDiskInGB: 50,
