@@ -59,7 +59,7 @@ Retries: GETs and other idempotent requests retry on 5xx/429 with exponential ba
 | `ListPods` | List pods with pagination |
 | `FindPodsByName` | Return every exact name match; makes no adoption/readiness inference |
 | `StopPod` / `ResumePod` / `TerminatePod` | Lifecycle |
-| `WaitForPodReady` | Poll until runtime is up; returns startup-timing decomposition |
+| `WaitForPodReady` | Poll until runtime is up or the pod goes terminal; bounded by `ctx` only; returns startup-timing decomposition |
 | `PodTimingSnapshot` | One-shot timing decomposition |
 | `GetPodDiagnostics` | Normalized diagnostics snapshot (runtime readiness, datacenter, reason) |
 | `GetProviderFeatureSupport` | Provider capability flags (pod logs: unsupported by RunPod's public API) |
@@ -160,7 +160,7 @@ Reclaim: a preempted spot pod is stopped, not deleted — it reports `desiredSta
 |----------|-------------|
 | `RunAsync` / `RunSync` | Submit a job (async returns immediately; sync blocks) |
 | `GetJobStatus` | Job status + results |
-| `WaitForJobCompletion` | Poll until terminal |
+| `WaitForJobCompletion` | Poll until the endpoint reports the job terminal; bounded by `ctx` only |
 | `RunAndWait` | RunAsync + WaitForJobCompletion |
 | `StreamResults` | Fetch partial/streaming results once |
 | `CancelJob` / `RetryJob` / `PurgeQueue` | Queue management |
@@ -176,6 +176,8 @@ json.Unmarshal(job.Output, &out)
 ```
 
 `RunSync` is bounded by the client HTTP timeout (default 30s); RunPod holds `/runsync` up to ~90s. Use `WithTimeout` or `RunAsync`+`WaitForJobCompletion` for longer jobs.
+
+The waiting helpers carry no wall clock: they end on observed state — runtime populated, pod terminal, job terminal — or when the `ctx` you pass ends. A cold image pull or a long job is never abandoned for having taken a while; pass a `ctx` with a deadline if you want one.
 
 ## Network volumes and registry auths (REST)
 

@@ -90,7 +90,7 @@ func TestJobLifecycle(t *testing.T) {
 	if err := srv.CompleteJob("ep1", job.ID, map[string]string{"answer": "hello"}); err != nil {
 		t.Fatalf("CompleteJob: %v", err)
 	}
-	done, err := client.WaitForJobCompletion(ctx, "ep1", job.ID, 5*time.Second)
+	done, err := client.WaitForJobCompletion(ctx, "ep1", job.ID)
 	if err != nil {
 		t.Fatalf("WaitForJobCompletion: %v", err)
 	}

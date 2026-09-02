@@ -3,6 +3,7 @@ package runpod
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -18,12 +19,20 @@ type stubPodScript struct {
 	mu      sync.Mutex
 	bodies  []string
 	cursor  int
+	polls   int
 	gqlBody string
+}
+
+func (s *stubPodScript) served() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.polls
 }
 
 func (s *stubPodScript) next() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.polls++
 	if s.cursor >= len(s.bodies) {
 		return s.bodies[len(s.bodies)-1]
 	}
@@ -99,7 +108,6 @@ func TestWaitForPodReady_RuntimeAlreadyUp(t *testing.T) {
 
 	timing, state, err := c.WaitForPodReady(ctx, "pod-1", &WaitForPodReadyOptions{
 		Interval: 50 * time.Millisecond,
-		Timeout:  1 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -139,7 +147,6 @@ func TestWaitForPodReady_PollsUntilRuntimeAppears(t *testing.T) {
 
 	timing, state, err := c.WaitForPodReady(ctx, "pod-2", &WaitForPodReadyOptions{
 		Interval: 50 * time.Millisecond,
-		Timeout:  1 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -155,7 +162,7 @@ func TestWaitForPodReady_PollsUntilRuntimeAppears(t *testing.T) {
 	}
 }
 
-func TestWaitForPodReady_TimeoutWithoutRuntime(t *testing.T) {
+func TestWaitForPodReady_WaitsUntilCallerCancels(t *testing.T) {
 	created := time.Now().Add(-30 * time.Second).UTC().Format(time.RFC3339)
 	started := time.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339)
 	script := &stubPodScript{bodies: []string{
@@ -164,21 +171,23 @@ func TestWaitForPodReady_TimeoutWithoutRuntime(t *testing.T) {
 	srv, c := newStubServer(t, script)
 	defer srv.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
 
 	timing, state, err := c.WaitForPodReady(ctx, "pod-3", &WaitForPodReadyOptions{
 		Interval: 50 * time.Millisecond,
-		Timeout:  300 * time.Millisecond,
 	})
-	if err == nil {
-		t.Fatal("expected timeout error, got nil")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected the caller ctx to be the only bound, got %v", err)
 	}
-	if state != PodReadyStateTimeout {
-		t.Errorf("got state=%v, want timeout", state)
+	if state != PodReadyStateCanceled {
+		t.Errorf("got state=%v, want canceled", state)
 	}
 	if timing == nil {
-		t.Fatal("timing should be populated even on timeout")
+		t.Fatal("timing should be populated even when the caller gives up")
+	}
+	if served := script.served(); served < 5 {
+		t.Errorf("polled %d times; expected the wait to keep polling until ctx ended", served)
 	}
 }
 
@@ -196,7 +205,6 @@ func TestWaitForPodReady_TerminalAbort(t *testing.T) {
 
 	_, state, err := c.WaitForPodReady(ctx, "pod-4", &WaitForPodReadyOptions{
 		Interval: 50 * time.Millisecond,
-		Timeout:  1 * time.Second,
 	})
 	if err == nil {
 		t.Fatal("expected terminal-state error")
