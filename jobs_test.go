@@ -444,7 +444,7 @@ func TestWaitForJobCompletion(t *testing.T) {
 	ctx := context.Background()
 
 	// Test with completed job
-	job, err := client.WaitForJobCompletion(ctx, "endpoint-123", "job-completed", 10*time.Second)
+	job, err := client.WaitForJobCompletion(ctx, "endpoint-123", "job-completed")
 	if err != nil {
 		t.Errorf("WaitForJobCompletion() error = %v", err)
 		return
@@ -455,7 +455,7 @@ func TestWaitForJobCompletion(t *testing.T) {
 	}
 
 	// Test with failed job
-	_, err = client.WaitForJobCompletion(ctx, "endpoint-123", "job-failed", 10*time.Second)
+	_, err = client.WaitForJobCompletion(ctx, "endpoint-123", "job-failed")
 	if err == nil {
 		t.Errorf("WaitForJobCompletion() expected error for failed job")
 	}
@@ -466,22 +466,34 @@ func TestRunAndWait(t *testing.T) {
 	defer server.Close()
 
 	client := mustClient(t, "test_key", runpod.WithServerlessBaseURL(server.URL))
-	ctx := context.Background()
 
-	// Since our mock server always returns completed jobs for specific IDs,
-	// we need to test with job-completed
-	// But RunAndWait submits a new job first
+	// The stub keeps this job IN_QUEUE forever. The wait holds no clock of its own, so
+	// the caller's ctx is what ends it — and the job is reported as still queued, never
+	// as failed.
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
 
-	// This is a basic test - (Note: in real implementation, we'd need more sophisticated mocking)
-	job, err := client.RunAndWait(ctx, "endpoint-123", map[string]string{"test": "input"}, 10*time.Second)
-	if err != nil {
-		// This might fail due to our simple mock server setup
-		t.Logf("RunAndWait() error = %v (expected with mock server)", err)
-		return
+	job, err := client.RunAndWait(ctx, "endpoint-123", map[string]string{"test": "input"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RunAndWait() error = %v, want the caller's deadline", err)
 	}
+	if job != nil {
+		t.Errorf("RunAndWait() returned a job for a wait the caller abandoned: %+v", job)
+	}
+}
 
-	if job == nil {
-		t.Errorf("RunAndWait() returned nil job")
+func TestRunAndWaitReturnsTerminalJob(t *testing.T) {
+	server := createJobTestServer()
+	defer server.Close()
+
+	client := mustClient(t, "test_key", runpod.WithServerlessBaseURL(server.URL))
+
+	job, err := client.WaitForJobCompletion(context.Background(), "endpoint-123", "job-completed")
+	if err != nil {
+		t.Fatalf("WaitForJobCompletion() error = %v", err)
+	}
+	if job.Status != "COMPLETED" {
+		t.Errorf("WaitForJobCompletion() status = %v, want COMPLETED", job.Status)
 	}
 }
 

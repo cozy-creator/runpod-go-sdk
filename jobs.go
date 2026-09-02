@@ -152,16 +152,18 @@ func (c *Client) GetHealth(ctx context.Context, endpointID string) (*EndpointHea
 // JOB MONITORING AND UTILITIES
 // ================================
 
-// WaitForJobCompletion waits for a job to complete or fail
-// Returns the final job state or an error if timeout is reached
-func (c *Client) WaitForJobCompletion(ctx context.Context, endpointID, jobID string, maxWaitTime time.Duration) (*Job, error) {
-	if maxWaitTime <= 0 {
-		maxWaitTime = 10 * time.Minute // Default timeout
-	}
+// jobPollInterval is the cadence of the status poll, not a bound on the job:
+// each GetJobStatus is itself bounded by the client HTTP timeout.
+const jobPollInterval = 5 * time.Second
 
-	deadline := time.Now().Add(maxWaitTime)
-
-	for time.Now().Before(deadline) {
+// WaitForJobCompletion polls until the endpoint reports the job terminal
+// (COMPLETED / FAILED / CANCELLED / TIMED_OUT).
+//
+// It holds no wall clock of its own: a job that is still progressing is not
+// killed by elapsed time. The only bound is ctx — a caller that wants to give
+// up passes a ctx that does.
+func (c *Client) WaitForJobCompletion(ctx context.Context, endpointID, jobID string) (*Job, error) {
+	for {
 		job, err := c.GetJobStatus(ctx, endpointID, jobID)
 		if err != nil {
 			return nil, err
@@ -183,12 +185,9 @@ func (c *Client) WaitForJobCompletion(ctx context.Context, endpointID, jobID str
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(5 * time.Second):
-			// Continue polling
+		case <-time.After(jobPollInterval):
 		}
 	}
-
-	return nil, fmt.Errorf("job %s did not complete within %v", jobID, maxWaitTime)
 }
 
 // IsJobTerminal checks if a job is in a terminal state (completed, failed, etc.)
@@ -241,9 +240,10 @@ func (c *Client) StreamResults(ctx context.Context, endpointID, jobID string) (*
 // CONVENIENCE FUNCTIONS
 // ================================
 
-// RunAndWait submits a job asynchronously and waits for completion
-// Combines RunAsync + WaitForJobCompletion for convenience
-func (c *Client) RunAndWait(ctx context.Context, endpointID string, input interface{}, maxWaitTime time.Duration) (*Job, error) {
+// RunAndWait submits a job asynchronously and waits for it to reach a
+// terminal state. Combines RunAsync + WaitForJobCompletion for convenience;
+// bounded by ctx only.
+func (c *Client) RunAndWait(ctx context.Context, endpointID string, input interface{}) (*Job, error) {
 	// Submit job
 	job, err := c.RunAsync(ctx, endpointID, input)
 	if err != nil {
@@ -251,5 +251,5 @@ func (c *Client) RunAndWait(ctx context.Context, endpointID string, input interf
 	}
 
 	// Wait for completion
-	return c.WaitForJobCompletion(ctx, endpointID, job.ID, maxWaitTime)
+	return c.WaitForJobCompletion(ctx, endpointID, job.ID)
 }

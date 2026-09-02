@@ -42,8 +42,8 @@ const (
 	PodReadyStateRuntimeReady
 	// PodReadyStateTerminal — pod entered a terminal state before reaching runtime.
 	PodReadyStateTerminal
-	// PodReadyStateTimeout — interval/timeout exceeded before runtime came up.
-	PodReadyStateTimeout
+	// PodReadyStateCanceled — the caller's ctx ended before either was observed.
+	PodReadyStateCanceled
 )
 
 func (s PodReadyState) String() string {
@@ -52,8 +52,8 @@ func (s PodReadyState) String() string {
 		return "runtime_ready"
 	case PodReadyStateTerminal:
 		return "terminal"
-	case PodReadyStateTimeout:
-		return "timeout"
+	case PodReadyStateCanceled:
+		return "canceled"
 	default:
 		return "unknown"
 	}
@@ -61,17 +61,15 @@ func (s PodReadyState) String() string {
 
 // WaitForPodReadyOptions controls the polling cadence and abort conditions.
 //
-// The defaults are tuned for monitoring an autoscaler-launched pod from
-// creation through first runtime visibility — typical end-to-end is 30s-15min
-// depending on whether the image is on the host or has to be pulled from
-// docker.io.
+// There is no wall-clock budget here: a pod that is still pulling its image is
+// not abandoned because it has taken "too long" (a cold pull from docker.io is
+// minutes, and the SDK cannot see pull progress to judge it). The wait ends on
+// what the API actually reports — runtime populated, or a terminal state — or
+// when the caller's ctx does.
 type WaitForPodReadyOptions struct {
-	// Interval between polls. Defaults to 5 seconds.
+	// Interval between polls. Defaults to 5 seconds. This is a poll cadence,
+	// not a bound: each GetPod is bounded by the client HTTP timeout.
 	Interval time.Duration
-	// Timeout — overall budget across all polls. Defaults to 15 minutes.
-	// Pass 0 to use the default; pass a negative value to disable the timeout
-	// (rely on ctx cancellation instead).
-	Timeout time.Duration
 	// NoAbortOnTerminal — when true, keep polling even after the pod enters a
 	// terminal state. By default the helper exits early on EXITED/TERMINATED
 	// because runpod won't transition back to runtime-ready from there.
@@ -81,7 +79,7 @@ type WaitForPodReadyOptions struct {
 // WaitForPodReady polls the pod every opts.Interval until either:
 //   - runtime is observed populated (returns timing decomposition + StateRuntimeReady)
 //   - pod enters a terminal state (returns whatever timing we have + StateTerminal)
-//   - opts.Timeout or ctx is exceeded (returns last-observed timing + StateTimeout)
+//   - ctx ends (returns last-observed timing + StateCanceled)
 //
 // Safe to call against a pod that's already running — it returns immediately
 // with current timing on the first poll.
@@ -91,26 +89,14 @@ func (c *Client) WaitForPodReady(ctx context.Context, podID string, opts *WaitFo
 	}
 
 	interval := 5 * time.Second
-	timeout := 15 * time.Minute
 	abortOnTerminal := true
 	if opts != nil {
 		if opts.Interval > 0 {
 			interval = opts.Interval
 		}
-		switch {
-		case opts.Timeout > 0:
-			timeout = opts.Timeout
-		case opts.Timeout < 0:
-			timeout = 0 // disabled
-		}
 		if opts.NoAbortOnTerminal {
 			abortOnTerminal = false
 		}
-	}
-
-	deadline := time.Time{}
-	if timeout > 0 {
-		deadline = time.Now().Add(timeout)
 	}
 
 	var lastTiming *PodReadyTiming
@@ -144,13 +130,9 @@ func (c *Client) WaitForPodReady(ctx context.Context, podID string, opts *WaitFo
 			return timing, PodReadyStateTerminal, fmt.Errorf("pod %s entered terminal state %q before runtime came up", podID, pod.Status())
 		}
 
-		if !deadline.IsZero() && time.Now().After(deadline) {
-			return timing, PodReadyStateTimeout, fmt.Errorf("pod %s did not reach runtime-ready within %s", podID, timeout)
-		}
-
 		select {
 		case <-ctx.Done():
-			return timing, PodReadyStateUnknown, ctx.Err()
+			return timing, PodReadyStateCanceled, ctx.Err()
 		case <-time.After(interval):
 		}
 	}

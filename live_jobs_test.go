@@ -100,7 +100,7 @@ func TestStreamAndWaitForJobCompletion(t *testing.T) {
 	}
 	t.Logf("🔁 Waiting for job %s to complete...", job.ID)
 
-	final, err := client.WaitForJobCompletion(ctx, endpointID, job.ID, 60*time.Second)
+	final, err := client.WaitForJobCompletion(ctx, endpointID, job.ID)
 	if err != nil {
 		t.Fatalf("WaitForJobCompletion failed: %v", err)
 	}
