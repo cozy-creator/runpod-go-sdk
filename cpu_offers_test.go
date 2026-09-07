@@ -3,9 +3,12 @@ package runpod
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -19,6 +22,7 @@ func TestGetCPUOffer(t *testing.T) {
 			t.Fatalf("decode request: %v", err)
 		}
 		if !strings.Contains(request.Query, "cpuFlavors") ||
+			!strings.Contains(request.Query, "diskLimitPerVcpu") ||
 			!strings.Contains(request.Query, "specifics(input: { instanceId: $instanceId, dataCenterId: $dataCenterId })") {
 			t.Fatalf("CPU quote query does not use exact specifics input: %s", request.Query)
 		}
@@ -28,7 +32,7 @@ func TestGetCPUOffer(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"data":{"cpuFlavors":[
 			{"id":"cpu3c","displayName":"3C","minVcpu":1,"maxVcpu":16,"ramMultiplier":2,"specifics":null},
-			{"id":"cpu5c","displayName":"5C","minVcpu":1,"maxVcpu":32,"ramMultiplier":2,
+			{"id":"cpu5c","displayName":"5C","minVcpu":1,"maxVcpu":32,"ramMultiplier":2,"diskLimitPerVcpu":15,
 			 "specifics":{"stockStatus":"High","securePrice":"0.125001"}}
 		]}}`)
 	}))
@@ -46,7 +50,7 @@ func TestGetCPUOffer(t *testing.T) {
 	}
 	if offer.CPUFamilyID != "cpu5c" || offer.CPUInstanceID != "cpu5c-2-4" ||
 		offer.DataCenterID != "US-KS-2" || offer.VCPUCount != 2 || offer.MemoryInGB != 4 ||
-		offer.StockStatus != "High" || offer.OnDemandPriceUSDMicrosPerHour != 125_001 {
+		offer.StockStatus != "High" || offer.OnDemandPriceUSDMicrosPerHour != 125_001 || offer.MaxContainerDiskGB != 30 {
 		t.Fatalf("CPU offer = %+v", offer)
 	}
 }
@@ -58,7 +62,7 @@ func TestGetCPUOfferPreservesPricedUnknownStock(t *testing.T) {
 		// stockStatus was omitted.
 		fmt.Fprint(w, `{"data":{"cpuFlavors":[
 			{"id":"cpu5c","displayName":"Compute-Optimized","minVcpu":2,"maxVcpu":32,
-			 "ramMultiplier":2,"specifics":{"securePrice":0.07}}
+			 "ramMultiplier":2,"diskLimitPerVcpu":15,"specifics":{"securePrice":0.07}}
 		]}}`)
 	}))
 	defer server.Close()
@@ -73,7 +77,7 @@ func TestGetCPUOfferPreservesPricedUnknownStock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCPUOffer: %v", err)
 	}
-	if offer.StockStatus != CPUStockStatusUnknown || offer.OnDemandPriceUSDMicrosPerHour != 70_000 {
+	if offer.StockStatus != CPUStockStatusUnknown || offer.OnDemandPriceUSDMicrosPerHour != 70_000 || offer.MaxContainerDiskGB != 30 {
 		t.Fatalf("CPU offer = %+v", offer)
 	}
 }
@@ -81,7 +85,7 @@ func TestGetCPUOfferPreservesPricedUnknownStock(t *testing.T) {
 func TestGetCPUOfferRefusesInexactPrice(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"data":{"cpuFlavors":[{"id":"cpu5c","minVcpu":1,"maxVcpu":32,"ramMultiplier":2,
+		fmt.Fprint(w, `{"data":{"cpuFlavors":[{"id":"cpu5c","minVcpu":1,"maxVcpu":32,"ramMultiplier":2,"diskLimitPerVcpu":15,
 			"specifics":{"stockStatus":"High","securePrice":0.0000001}}]}}`)
 	}))
 	defer server.Close()
@@ -103,6 +107,67 @@ func TestGetCPUOfferValidatesExactShape(t *testing.T) {
 		if _, err := client.GetCPUOffer(t.Context(), request); err == nil {
 			t.Fatalf("invalid CPU quote request was admitted: %+v", request)
 		}
+	}
+}
+
+func TestGetCPUOfferDiskLimit(t *testing.T) {
+	for _, test := range []struct {
+		instance, field string
+		want            int
+	}{
+		{"cpu3c-2-4", `,"diskLimitPerVcpu":10`, 20},
+		{"cpu5c-2-4", `,"diskLimitPerVcpu":15`, 30},
+		{"cpu3c-8-16", `,"diskLimitPerVcpu":10`, 80},
+		{"cpu5c-4-8", `,"diskLimitPerVcpu":15`, 60},
+		// The provider value, not a second family table, determines the result.
+		{"cpu5c-2-4", `,"diskLimitPerVcpu":11`, 22},
+		{"cpu5c-3-6", `,"diskLimitPerVcpu":12.5`, 37},
+		{"cpu5c-2-4", ``, 0},
+		{"cpu5c-2-4", `,"diskLimitPerVcpu":null`, 0},
+		{"cpu5c-2-4", `,"diskLimitPerVcpu":0`, 0},
+		{"cpu5c-2-4", `,"diskLimitPerVcpu":-15`, 0},
+		{"cpu5c-2-4", `,"diskLimitPerVcpu":0.1`, 0},
+		{"cpu5c-2-4", `,"diskLimitPerVcpu":"NaN"`, 0},
+		{"cpu5c-2-4", `,"diskLimitPerVcpu":true`, 0},
+		{"cpu5c-2-4", `,"diskLimitPerVcpu":1e999`, 0},
+		{"cpu5c-2-4", `,"diskLimitPerVcpu":1e308`, 0},
+		// The product is the first nonrepresentable positive int on this platform.
+		{"cpu5c-2-4", `,"diskLimitPerVcpu":` + strconv.FormatFloat(math.Ldexp(1, strconv.IntSize-2), 'g', -1, 64), 0},
+	} {
+		t.Run(test.instance+test.field, func(t *testing.T) {
+			var calls atomic.Int32
+			family := strings.Split(test.instance, "-")[0]
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				var request struct {
+					Query string `json:"query"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Error(err)
+				}
+				if !strings.Contains(request.Query, "diskLimitPerVcpu") {
+					t.Error("disk limit missing from existing offer query")
+				}
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintf(w, `{"data":{"cpuFlavors":[{"id":%q,"minVcpu":1,"maxVcpu":32,"ramMultiplier":2%s,"specifics":{"stockStatus":"High","securePrice":"0.07"}}]}}`, family, test.field)
+			}))
+			defer server.Close()
+			client, err := NewClient("test-key", WithGraphQLBaseURL(server.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			offer, err := client.GetCPUOffer(t.Context(), CPUOfferRequest{InstanceID: test.instance, DataCenterID: "US-KS-2"})
+			if test.want == 0 {
+				if err == nil {
+					t.Fatalf("invalid provider disk limit accepted: %+v", offer)
+				}
+			} else if err != nil || offer.MaxContainerDiskGB != test.want {
+				t.Fatalf("offer=%+v err=%v; want disk %dGB", offer, err, test.want)
+			}
+			if got := calls.Load(); got != 1 {
+				t.Fatalf("made %d requests for one CPU offer", got)
+			}
+		})
 	}
 }
 

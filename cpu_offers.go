@@ -3,6 +3,7 @@ package runpod
 import (
 	"context"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -33,16 +34,19 @@ type CPUOffer struct {
 	MemoryInGB                    int
 	StockStatus                   string
 	OnDemandPriceUSDMicrosPerHour USDMicrosPerHour
+	// MaxContainerDiskGB is the provider limit for this exact vCPU shape.
+	MaxContainerDiskGB int
 }
 
 type graphQLCPUOfferPayload struct {
 	CPUFlavors []struct {
-		ID            string  `json:"id"`
-		DisplayName   string  `json:"displayName"`
-		MinVCPU       float64 `json:"minVcpu"`
-		MaxVCPU       int     `json:"maxVcpu"`
-		RAMMultiplier float64 `json:"ramMultiplier"`
-		Specifics     *struct {
+		ID               string  `json:"id"`
+		DisplayName      string  `json:"displayName"`
+		MinVCPU          float64 `json:"minVcpu"`
+		MaxVCPU          int     `json:"maxVcpu"`
+		RAMMultiplier    float64 `json:"ramMultiplier"`
+		DiskLimitPerVCPU float64 `json:"diskLimitPerVcpu"`
+		Specifics        *struct {
 			StockStatus string            `json:"stockStatus"`
 			SecurePrice *USDMicrosPerHour `json:"securePrice"`
 		} `json:"specifics"`
@@ -78,6 +82,7 @@ query($instanceId: String!, $dataCenterId: String!) {
     minVcpu
     maxVcpu
     ramMultiplier
+    diskLimitPerVcpu
     specifics(input: { instanceId: $instanceId, dataCenterId: $dataCenterId }) {
       stockStatus
       securePrice
@@ -111,10 +116,18 @@ query($instanceId: String!, $dataCenterId: String!) {
 		if flavor.RAMMultiplier > 0 && float64(memory) != float64(vcpu)*flavor.RAMMultiplier {
 			return out, fmt.Errorf("RunPod CPU instance %s disagrees with flavor RAM multiplier", instanceID)
 		}
+		maxDisk := math.Floor(flavor.DiskLimitPerVCPU * float64(vcpu))
+		// Missing/null fields decode to zero. Check the exclusive integer bound
+		// before conversion: float64(MaxInt) rounds up on 64-bit platforms.
+		if flavor.DiskLimitPerVCPU <= 0 || math.IsNaN(maxDisk) || math.IsInf(maxDisk, 0) ||
+			maxDisk < 1 || maxDisk >= math.Ldexp(1, strconv.IntSize-1) {
+			return out, fmt.Errorf("RunPod CPU flavor %s has no valid container disk limit for %d vCPU", familyID, vcpu)
+		}
 		out = CPUOffer{
 			CPUFamilyID: familyID, CPUInstanceID: instanceID, DataCenterID: dataCenterID,
 			DisplayName: strings.TrimSpace(flavor.DisplayName), VCPUCount: vcpu, MemoryInGB: memory,
-			StockStatus: stock, OnDemandPriceUSDMicrosPerHour: *flavor.Specifics.SecurePrice,
+			MaxContainerDiskGB: int(maxDisk),
+			StockStatus:        stock, OnDemandPriceUSDMicrosPerHour: *flavor.Specifics.SecurePrice,
 		}
 	}
 	if matches != 1 {
