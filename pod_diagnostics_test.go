@@ -156,8 +156,8 @@ func TestGetPodDiagnostics_StatusMatrix(t *testing.T) {
 func TestGetProviderFeatureSupport(t *testing.T) {
 	client := mustClient(t, "test_key")
 	cap := client.GetProviderFeatureSupport(context.Background())
-	if cap.PodLogsAPI {
-		t.Fatal("expected pod logs capability to be false")
+	if !cap.PodLogsAPI {
+		t.Fatal("expected REST v2 pod logs capability")
 	}
 	if strings.TrimSpace(cap.Reason) == "" {
 		t.Fatal("expected non-empty reason")
