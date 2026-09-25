@@ -35,6 +35,7 @@ type PodLogsOptions struct {
 
 // PodLogEntry is one provider SSE data event. Line is diagnostic text, not an
 // authoritative pod lifecycle state. ID is the exact SSE reconnect cursor.
+// IDs and timestamps need not be unique; distinct lines can share both.
 type PodLogEntry struct {
 	ID        string       `json:"id"`
 	Source    PodLogSource `json:"source"`

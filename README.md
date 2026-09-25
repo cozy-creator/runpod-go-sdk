@@ -290,7 +290,8 @@ for {
 The wire format is SSE, decoded into `PodLogEntry`; it is not wire JSONL. Omit
 Source for both streams; Tail applies per source, nil uses100 and zero means no
 history. Since is RFC3339 time. LastEventID takes precedence over Since and Tail
-and remains opaque, including provider sequence suffixes. Tail is at most5000.
+and remains opaque, including provider sequence suffixes. IDs and timestamps can
+repeat on distinct lines; do not deduplicate by ID alone. Tail is at most5000.
 The API does not signal replay completion and may withhold even HTTP headers until
 it has a matching line. Context/client timeout and EOF remain errors, not successful
 empty snapshots. The caller owns snapshot limits and reconnects; the SDK does not
