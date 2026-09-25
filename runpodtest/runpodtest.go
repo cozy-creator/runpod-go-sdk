@@ -47,6 +47,7 @@ type Server struct {
 	mu                      sync.Mutex
 	nextID                  int
 	pods                    map[string]*runpod.Pod
+	podLogs                 map[string][]runpod.PodLogEntry
 	volumes                 map[string]*runpod.NetworkVolume
 	auths                   map[string]*runpod.ContainerRegistryAuth
 	jobs                    map[string]*fakeJob // key: endpointID + "/" + jobID
@@ -73,6 +74,7 @@ func New() *Server {
 	clientBalance := "100"
 	s := &Server{
 		pods:                    map[string]*runpod.Pod{},
+		podLogs:                 map[string][]runpod.PodLogEntry{},
 		volumes:                 map[string]*runpod.NetworkVolume{},
 		auths:                   map[string]*runpod.ContainerRegistryAuth{},
 		jobs:                    map[string]*fakeJob{},
@@ -121,6 +123,7 @@ func (s *Server) Client(opts ...runpod.ClientOption) (*runpod.Client, error) {
 func (s *Server) ClientWithAPIKey(apiKey string, opts ...runpod.ClientOption) (*runpod.Client, error) {
 	base := []runpod.ClientOption{
 		runpod.WithBaseURL(s.httpServer.URL),
+		runpod.WithRESTV2BaseURL(s.httpServer.URL + "/rest-v2"),
 		runpod.WithServerlessBaseURL(s.httpServer.URL),
 		runpod.WithGraphQLBaseURL(s.httpServer.URL + "/graphql"),
 	}
@@ -317,6 +320,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case path == "/graphql":
 		s.handleGraphQL(w, r)
+	case strings.HasPrefix(path, "/rest-v2/pods/"):
+		s.handlePodLogs(w, r, path)
 	case strings.HasPrefix(path, "/v2/"):
 		s.handleServerless(w, r, path)
 	case strings.HasPrefix(path, "/pods"):

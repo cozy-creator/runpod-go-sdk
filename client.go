@@ -20,6 +20,9 @@ const (
 	// DefaultBaseURL is the default RunPod REST API base URL
 	DefaultBaseURL = "https://rest.runpod.io/v1"
 
+	// DefaultRESTV2BaseURL is the REST v2 base used by pod log streams.
+	DefaultRESTV2BaseURL = "https://api.runpod.io/v2"
+
 	// DefaultServerlessBaseURL is the base URL for serverless operations
 	DefaultServerlessBaseURL = "https://api.runpod.ai"
 
@@ -49,6 +52,7 @@ const (
 type Client struct {
 	apiKey            string
 	baseURL           string
+	restV2BaseURL     string
 	serverlessBaseURL string
 	graphqlBaseURL    string
 
@@ -82,6 +86,11 @@ func WithBaseURL(baseURL string) ClientOption {
 	return func(c *Client) {
 		c.baseURL = baseURL
 	}
+}
+
+// WithRESTV2BaseURL sets the REST v2 base used by pod log streams.
+func WithRESTV2BaseURL(baseURL string) ClientOption {
+	return func(c *Client) { c.restV2BaseURL = baseURL }
 }
 
 // WithServerlessBaseURL sets a custom base URL for serverless operations
@@ -156,6 +165,7 @@ func NewClient(apiKey string, opts ...ClientOption) (*Client, error) {
 	c := &Client{
 		apiKey:            apiKey,
 		baseURL:           DefaultBaseURL,
+		restV2BaseURL:     DefaultRESTV2BaseURL,
 		serverlessBaseURL: DefaultServerlessBaseURL,
 		graphqlBaseURL:    DefaultGraphQLBaseURL,
 		httpClient: &http.Client{
@@ -204,6 +214,10 @@ func (c *Client) makeRequest(ctx context.Context, method, endpoint string, body 
 // whose request body must be durably recorded before the provider call and then
 // sent without a second marshal.
 func (c *Client) makeRequestBytes(ctx context.Context, method, endpoint string, jsonBody []byte) (*http.Response, error) {
+	return c.makeRequestBytesWithHeaders(ctx, method, endpoint, jsonBody, nil)
+}
+
+func (c *Client) makeRequestBytesWithHeaders(ctx context.Context, method, endpoint string, jsonBody []byte, headers http.Header) (*http.Response, error) {
 
 	var lastErr error
 	var retryAfter time.Duration
@@ -218,7 +232,7 @@ func (c *Client) makeRequestBytes(ctx context.Context, method, endpoint string, 
 			retryAfter = 0
 		}
 
-		resp, err := c.doRequest(ctx, method, endpoint, jsonBody)
+		resp, err := c.doRequestWithHeaders(ctx, method, endpoint, jsonBody, headers)
 		if err != nil {
 			lastErr = err
 
@@ -290,6 +304,10 @@ func parseRetryAfter(v string) time.Duration {
 
 // doRequest performs a single HTTP request.
 func (c *Client) doRequest(ctx context.Context, method, endpoint string, jsonBody []byte) (*http.Response, error) {
+	return c.doRequestWithHeaders(ctx, method, endpoint, jsonBody, nil)
+}
+
+func (c *Client) doRequestWithHeaders(ctx context.Context, method, endpoint string, jsonBody []byte, headers http.Header) (*http.Response, error) {
 	var buf io.Reader
 	if jsonBody != nil {
 		buf = bytes.NewReader(jsonBody)
@@ -303,6 +321,9 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, jsonBod
 	}
 
 	c.setRequestHeaders(req, jsonBody != nil)
+	for name, values := range headers {
+		req.Header[name] = append([]string(nil), values...)
+	}
 
 	if c.debug {
 		c.logger.Printf("[DEBUG] %s %s", method, fullURL)
@@ -397,12 +418,18 @@ func (c *Client) parseErrorResponse(statusCode int, header http.Header, body []b
 	var simpleErr struct {
 		Error   string `json:"error"`
 		Message string `json:"message"`
+		Title   string `json:"title"`
+		Detail  string `json:"detail"`
 	}
 	if err := json.Unmarshal(body, &simpleErr); err == nil {
 		if simpleErr.Error != "" {
 			apiErr.Message = simpleErr.Error
 		} else if simpleErr.Message != "" {
 			apiErr.Message = simpleErr.Message
+		} else if simpleErr.Detail != "" {
+			apiErr.Message = simpleErr.Detail
+		} else if simpleErr.Title != "" {
+			apiErr.Message = simpleErr.Title
 		}
 	}
 	if apiErr.Message == "" {

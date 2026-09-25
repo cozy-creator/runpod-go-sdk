@@ -11,8 +11,8 @@ import (
 func (c *Client) GetProviderFeatureSupport(ctx context.Context) ProviderFeatureSupport {
 	_ = ctx
 	return ProviderFeatureSupport{
-		PodLogsAPI: false,
-		Reason:     "RunPod public REST/GraphQL APIs do not expose a supported pod logs endpoint",
+		PodLogsAPI: true,
+		Reason:     "RunPod REST v2 exposes container and system pod log streams",
 	}
 }
 

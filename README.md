@@ -62,7 +62,7 @@ Retries: GETs and other idempotent requests retry on 5xx/429 with exponential ba
 | `WaitForPodReady` | Poll until runtime is up; returns startup-timing decomposition |
 | `PodTimingSnapshot` | One-shot timing decomposition |
 | `GetPodDiagnostics` | Normalized diagnostics snapshot (runtime readiness, datacenter, reason) |
-| `GetProviderFeatureSupport` | Provider capability flags (pod logs: unsupported by RunPod's public API) |
+| `GetProviderFeatureSupport` | Provider capability flags (REST v2 pod log streams supported) |
 
 ### Stock-outs and GPU-type fallback
 
@@ -261,3 +261,44 @@ srv.CompleteJob(endpointID, jobID, myOutput)
 ## License
 
 MIT
+
+### Pod startup and container logs (REST v2)
+
+`StreamPodLogs` reads `https://api.runpod.io/v2/pods/{id}/logs` using the same
+API key. This is separate from REST v1 CRUD and serverless inference hosts.
+`WithRESTV2BaseURL` overrides only the REST v2 base.
+
+```go
+client, err := runpod.NewClient(apiKey, runpod.WithTimeout(0))
+if err != nil { return err }
+// ctx belongs to the caller: cancel it when the observation is complete.
+tail := 100
+stream, err := client.StreamPodLogs(ctx, podID, &runpod.PodLogsOptions{
+    Source: runpod.PodLogSourceSystem,
+    Tail: &tail,
+})
+if err != nil { return err }
+defer stream.Close()
+for {
+    entry, err := stream.Next()
+    if err != nil { return err }
+    // Preserve entry.ID as LastEventID when explicitly reconnecting.
+    observe(entry.Source, entry.Line, entry.Timestamp, entry.ID)
+}
+```
+
+The wire format is SSE, decoded into `PodLogEntry`; it is not wire JSONL. Omit
+Source for both streams; Tail applies per source, nil uses100 and zero means no
+history. Since is RFC3339 time. LastEventID takes precedence over Since and Tail
+and remains opaque, including provider sequence suffixes. IDs and timestamps can
+repeat on distinct lines; do not deduplicate by ID alone. Tail is at most5000.
+The API does not signal replay completion and may withhold even HTTP headers until
+it has a matching line. Context/client timeout and EOF remain errors, not successful
+empty snapshots. The caller owns snapshot limits and reconnects; the SDK does not
+invent idle-completion rules or silently replay delivered entries. The configured
+HTTP client timeout covers the whole stream; use WithTimeout(0) with a caller-owned
+context for long-lived streams. Log text is diagnostic evidence, not pod lifecycle
+authority.
+
+Contract: [official OpenAPI](https://api.runpod.io/v2/openapi.json) and
+[official runpodctl logs documentation](https://github.com/runpod/runpodctl#reading-logs).
