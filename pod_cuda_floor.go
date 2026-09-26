@@ -32,7 +32,7 @@ type cudaFloorPodInput struct {
 	GPUTypeID               string                   `json:"gpuTypeId"`
 	GPUCount                int                      `json:"gpuCount"`
 	ContainerDiskInGB       int                      `json:"containerDiskInGb"`
-	VolumeInGB              int                      `json:"volumeInGb,omitempty"`
+	VolumeInGB              int                      `json:"volumeInGb"`
 	VolumeMountPath         string                   `json:"volumeMountPath,omitempty"`
 	DataCenterID            string                   `json:"dataCenterId,omitempty"`
 	Env                     []podEnvironmentVariable `json:"env,omitempty"`
