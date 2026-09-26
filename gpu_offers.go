@@ -59,11 +59,14 @@ type GPUOfferFilter struct {
 	// DataCenterID restricts lowestPrice to one exact RunPod data center.
 	// The API also accepts comma-separated IDs, but exact-placement callers
 	// should pass one.
-	DataCenterID  string
-	MinMemoryInGB int
-	MinVCPUCount  int
-	MinDisk       int
-	TotalDisk     int
+	DataCenterID    string
+	MinMemoryInGB   int
+	MinVCPUCount    int
+	MinDisk         int
+	TotalDisk       int
+	MinDownloadMbps int
+	MinUploadMbps   int
+	SupportPublicIP *bool
 	// IDs filters to specific GPU type IDs.
 	IDs []string
 	// InStockOnly drops offers whose stock status is unavailable.
@@ -121,6 +124,10 @@ func (c *Client) ListGPUOffers(ctx context.Context, filter *GPUOfferFilter) ([]G
 			return nil, NewValidationError("minVcpuCount", "cannot be negative")
 		case filter.MinDisk < 0:
 			return nil, NewValidationError("minDisk", "cannot be negative")
+		case filter.MinDownloadMbps < 0:
+			return nil, NewValidationError("minDownload", "cannot be negative")
+		case filter.MinUploadMbps < 0:
+			return nil, NewValidationError("minUpload", "cannot be negative")
 		case filter.TotalDisk < 0:
 			return nil, NewValidationError("totalDisk", "cannot be negative")
 		}
@@ -137,20 +144,20 @@ func (c *Client) ListGPUOffers(ctx context.Context, filter *GPUOfferFilter) ([]G
 	}
 
 	query := `
-query($gpuCount: Int!, $minCudaVersion: String, $allowedCudaVersions: [String], $dataCenterId: String, $minMemoryInGb: Int, $minVcpuCount: Int, $minDisk: Int, $totalDisk: Int) {
+query($gpuCount: Int!, $minCudaVersion: String, $allowedCudaVersions: [String], $dataCenterId: String, $minMemoryInGb: Int, $minVcpuCount: Int, $minDisk: Int, $totalDisk: Int, $minDownload: Int, $minUpload: Int, $supportPublicIp: Boolean) {
   gpuTypes {
     id
     displayName
     memoryInGb
     secureCloud
     communityCloud
-    secure: lowestPrice(input: { gpuCount: $gpuCount, minCudaVersion: $minCudaVersion, allowedCudaVersions: $allowedCudaVersions, dataCenterId: $dataCenterId, minMemoryInGb: $minMemoryInGb, minVcpuCount: $minVcpuCount, minDisk: $minDisk, totalDisk: $totalDisk, secureCloud: true }) {
+    secure: lowestPrice(input: { gpuCount: $gpuCount, minCudaVersion: $minCudaVersion, allowedCudaVersions: $allowedCudaVersions, dataCenterId: $dataCenterId, minMemoryInGb: $minMemoryInGb, minVcpuCount: $minVcpuCount, minDisk: $minDisk, totalDisk: $totalDisk, minDownload: $minDownload, minUpload: $minUpload, supportPublicIp: $supportPublicIp, secureCloud: true }) {
       minimumBidPrice
       uninterruptablePrice
       stockStatus
       availableGpuCounts
     }
-    community: lowestPrice(input: { gpuCount: $gpuCount, minCudaVersion: $minCudaVersion, allowedCudaVersions: $allowedCudaVersions, dataCenterId: $dataCenterId, minMemoryInGb: $minMemoryInGb, minVcpuCount: $minVcpuCount, minDisk: $minDisk, totalDisk: $totalDisk, secureCloud: false }) {
+    community: lowestPrice(input: { gpuCount: $gpuCount, minCudaVersion: $minCudaVersion, allowedCudaVersions: $allowedCudaVersions, dataCenterId: $dataCenterId, minMemoryInGb: $minMemoryInGb, minVcpuCount: $minVcpuCount, minDisk: $minDisk, totalDisk: $totalDisk, minDownload: $minDownload, minUpload: $minUpload, supportPublicIp: $supportPublicIp, secureCloud: false }) {
       minimumBidPrice
       uninterruptablePrice
       stockStatus
@@ -170,6 +177,9 @@ query($gpuCount: Int!, $minCudaVersion: String, $allowedCudaVersions: [String], 
 		variables["minVcpuCount"] = filter.MinVCPUCount
 		variables["minDisk"] = filter.MinDisk
 		variables["totalDisk"] = filter.TotalDisk
+		variables["minDownload"] = filter.MinDownloadMbps
+		variables["minUpload"] = filter.MinUploadMbps
+		variables["supportPublicIp"] = filter.SupportPublicIP
 	}
 
 	var payload graphQLGPUOfferPayload

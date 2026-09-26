@@ -48,6 +48,9 @@ func (c *Client) PrepareCreatePod(req *CreatePodRequest) ([]byte, error) {
 	if !strings.EqualFold(strings.TrimSpace(req.ComputeType), "CPU") && len(req.GPUTypeIDs) != 1 {
 		return nil, NewValidationError("gpuTypeIds", "must contain exactly one type for a prepared create")
 	}
+	if req.MinCudaVersion != "" {
+		return prepareCUDAFloorPod(req)
+	}
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("prepare pod create: %w", err)
@@ -62,6 +65,9 @@ func (c *Client) PrepareCreatePod(req *CreatePodRequest) ([]byte, error) {
 func (c *Client) InspectPreparedCreatePod(prepared []byte) (*CreatePodRequest, error) {
 	if len(prepared) == 0 {
 		return nil, NewValidationError("prepared", "cannot be empty")
+	}
+	if isGraphQLPodCreate(prepared) {
+		return c.inspectCUDAFloorPod(prepared)
 	}
 	dec := json.NewDecoder(bytes.NewReader(prepared))
 	dec.DisallowUnknownFields()
@@ -91,6 +97,9 @@ func (c *Client) ExecuteCreatePod(ctx context.Context, prepared []byte) (*Pod, e
 	req, err := c.InspectPreparedCreatePod(body)
 	if err != nil {
 		return nil, err
+	}
+	if isGraphQLPodCreate(body) {
+		return c.executeCUDAFloorPod(ctx, body, req)
 	}
 
 	var pod Pod
