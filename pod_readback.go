@@ -2,6 +2,7 @@ package runpod
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sort"
@@ -152,7 +153,9 @@ const (
 )
 
 // PodReadbackError is a typed stage failure. Partial retains any successful
-// earlier source read, including its observation window.
+// earlier source read, including its observation window. Cause retains the original
+// provider error. Unwrapping a missing GraphQL projection yields ErrIncompleteReadback,
+// never ErrNotFound for the pod already found by REST.
 type PodReadbackError struct {
 	PodID   string
 	Stage   PodReadbackStage
@@ -164,13 +167,23 @@ func (e *PodReadbackError) Error() string {
 	return fmt.Sprintf("runpod: pod %q readback failed at %s stage: %v", e.PodID, e.Stage, e.Cause)
 }
 
-func (e *PodReadbackError) Unwrap() error { return e.Cause }
+func (e *PodReadbackError) Unwrap() error {
+	if e.Stage == PodReadbackStageGraphQL && errors.Is(e.Cause, ErrNotFound) {
+		// REST already found the pod. Preserve the provider error in Cause
+		// for diagnosis without presenting its missing supplemental projection
+		// as ErrNotFound for the resource GetPodReadback was asked to read.
+		return ErrIncompleteReadback
+	}
+	return e.Cause
+}
 
 // GetPodReadback observes REST first and GraphQL second. It requests detailed
 // REST machine and network-volume projections regardless of opts; opts can add
 // other REST expansions. Cross-source disagreements are returned as facts in
 // Checks rather than discarded as generic errors. Only an invalid/mismatched
-// pod identity makes the join unusable.
+// pod identity makes the join unusable. ErrNotFound identifies primary REST
+// absence; missing supplemental GraphQL data yields ErrIncompleteReadback and
+// a PodReadbackError whose Partial retains the successful REST observation.
 func (c *Client) GetPodReadback(ctx context.Context, podID string, opts *GetPodOptions) (*PodReadback, error) {
 	out := &PodReadback{RequestedPodID: podID}
 	if err := c.validateRequired("podID", podID); err != nil {
