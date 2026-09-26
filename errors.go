@@ -12,6 +12,9 @@ import (
 var (
 	// ErrNotFound matches 404 responses.
 	ErrNotFound = errors.New("runpod: not found")
+	// ErrIncompleteReadback means a supplemental projection was absent after
+	// the primary REST resource lookup succeeded. It does not prove pod loss.
+	ErrIncompleteReadback = errors.New("runpod: incomplete pod readback")
 	// ErrUnauthorized matches 401/403 responses (bad API key / permissions).
 	ErrUnauthorized = errors.New("runpod: unauthorized")
 	// ErrRateLimited matches 429 responses.
