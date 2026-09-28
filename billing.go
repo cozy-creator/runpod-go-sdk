@@ -16,6 +16,9 @@ import (
 const (
 	podBillingGrouping   = "podId"
 	podBillingBucketSize = "hour"
+	// podBillingBucketLayout is RunPod's zoneless bucket time, documented and
+	// observed as UTC ("2026-09-28 09:00:00"). No other zoneless form is accepted.
+	podBillingBucketLayout = "2006-01-02 15:04:05"
 
 	// maxPodBillingResponseBytes bounds the exact provider evidence retained
 	// for one hourly-history query.
@@ -23,8 +26,8 @@ const (
 )
 
 // PodBillingRecord is one provider-reported hourly billing aggregate. Money
-// is signed integer USD micros so corrective provider records remain evidence
-// without passing through float64.
+// is signed integer USD micros, rounded from the exact provider decimal to the
+// nearest micro without passing through float64.
 type PodBillingRecord struct {
 	PodID           string    `json:"podId"`
 	BucketStart     time.Time `json:"time"`
@@ -49,7 +52,6 @@ type PodBillingEvidenceErrorKind string
 
 const (
 	PodBillingEvidenceSchemaAmbiguity  PodBillingEvidenceErrorKind = "schema_ambiguity"
-	PodBillingEvidenceSubmicroAmount   PodBillingEvidenceErrorKind = "submicro_amount"
 	PodBillingEvidenceAmountOverflow   PodBillingEvidenceErrorKind = "amount_overflow"
 	PodBillingEvidenceResponseTooLarge PodBillingEvidenceErrorKind = "response_too_large"
 )
@@ -87,7 +89,7 @@ func (e *PodBillingEvidenceError) Unwrap() error {
 // GetPodBillingHistory retrieves RunPod's hourly billing aggregates for one
 // exact pod and UTC interval. The request always forces grouping=podId and
 // bucketSize=hour. An empty JSON array is valid zero-cost evidence; malformed,
-// incomplete, foreign-pod, sub-micro, or overflowing evidence is refused.
+// incomplete, foreign-pod, or overflowing evidence is refused.
 func (c *Client) GetPodBillingHistory(ctx context.Context, podID string, startTime, endTime time.Time) (*PodBillingHistory, error) {
 	if podID == "" || podID != strings.TrimSpace(podID) {
 		return nil, NewValidationError("podID", "must be a non-empty exact pod id")
@@ -207,23 +209,18 @@ func decodePodBillingHistory(body []byte, requestedPodID string) ([]PodBillingRe
 		if raw.Time == nil || *raw.Time == "" {
 			return nil, 0, newPodBillingEvidenceError(PodBillingEvidenceSchemaAmbiguity, "", nil, "record %d omitted time", i)
 		}
-		bucketTime, err := time.Parse(time.RFC3339Nano, *raw.Time)
+		bucketTime, err := parsePodBillingBucketTime(*raw.Time)
 		if err != nil {
 			return nil, 0, newPodBillingEvidenceError(PodBillingEvidenceSchemaAmbiguity, "", nil, "record %d has invalid time: %v", i, err)
 		}
 		if len(raw.Amount) == 0 || bytes.Equal(bytes.TrimSpace(raw.Amount), []byte("null")) {
 			return nil, 0, newPodBillingEvidenceError(PodBillingEvidenceSchemaAmbiguity, "", nil, "record %d omitted amount", i)
 		}
-		amountMicros, err := parseJSONUSDMicros(raw.Amount)
+		amountMicros, err := parseJSONUSDMicrosNearest(raw.Amount)
 		if err != nil {
 			kind := PodBillingEvidenceSchemaAmbiguity
-			if moneyErr, ok := err.(*usdMicrosParseError); ok {
-				switch moneyErr.kind {
-				case usdMicrosSubmicro:
-					kind = PodBillingEvidenceSubmicroAmount
-				case usdMicrosOverflow:
-					kind = PodBillingEvidenceAmountOverflow
-				}
+			if moneyErr, ok := err.(*usdMicrosParseError); ok && moneyErr.kind == usdMicrosOverflow {
+				kind = PodBillingEvidenceAmountOverflow
 			}
 			return nil, 0, newPodBillingEvidenceError(kind, "", nil, "record %d amount: %v", i, err)
 		}
@@ -246,4 +243,13 @@ func decodePodBillingHistory(body []byte, requestedPodID string) ([]PodBillingRe
 		})
 	}
 	return records, total, nil
+}
+
+// parsePodBillingBucketTime accepts an RFC 3339 instant or RunPod's zoneless
+// UTC bucket layout; any other zoneless form stays ambiguous.
+func parsePodBillingBucketTime(raw string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return t, nil
+	}
+	return time.ParseInLocation(podBillingBucketLayout, raw, time.UTC)
 }

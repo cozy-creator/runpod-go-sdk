@@ -75,6 +75,39 @@ func TestGetPodBillingHistorySendsNormalizedExactQueryAndReturnsEvidence(t *test
 	}
 }
 
+// The body is RunPod's verbatim answer for pod 3hnjdqs4ylflk7 (2026-09-28):
+// zoneless UTC bucket times and float-computed sub-micro amounts.
+func TestGetPodBillingHistoryAcceptsRunPodWireShape(t *testing.T) {
+	const response = `[{"amount":6.072548240656033,"timeBilledMs":2601516,"diskSpaceBilledGB":2700,"podId":"3hnjdqs4ylflk7","time":"2026-09-28 09:00:00"},{"amount":8.409179071895778,"timeBilledMs":3603235,"diskSpaceBilledGB":3600,"podId":"3hnjdqs4ylflk7","time":"2026-09-28 10:00:00"},{"amount":1.6644677189178765,"timeBilledMs":713766,"diskSpaceBilledGB":900,"podId":"3hnjdqs4ylflk7","time":"2026-09-28 11:00:00"}]`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(response))
+	}))
+	defer server.Close()
+
+	client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL), runpod.WithMaxRetryAttempts(0))
+	start := time.Date(2026, 9, 28, 9, 0, 0, 0, time.UTC)
+	got, err := client.GetPodBillingHistory(context.Background(), "3hnjdqs4ylflk7", start, start.Add(4*time.Hour))
+	if err != nil {
+		t.Fatalf("GetPodBillingHistory: %v", err)
+	}
+	want := []runpod.PodBillingRecord{
+		{PodID: "3hnjdqs4ylflk7", BucketStart: start, AmountUSDMicros: 6_072_548, TimeBilledMs: 2_601_516},
+		{PodID: "3hnjdqs4ylflk7", BucketStart: start.Add(time.Hour), AmountUSDMicros: 8_409_179, TimeBilledMs: 3_603_235},
+		{PodID: "3hnjdqs4ylflk7", BucketStart: start.Add(2 * time.Hour), AmountUSDMicros: 1_664_468, TimeBilledMs: 713_766},
+	}
+	if len(got.Records) != len(want) {
+		t.Fatalf("records = %+v", got.Records)
+	}
+	for i := range want {
+		if got.Records[i] != want[i] {
+			t.Errorf("record %d = %+v; want %+v", i, got.Records[i], want[i])
+		}
+	}
+	if got.TotalAmountUSDMicros != 16_146_195 {
+		t.Errorf("TotalAmountUSDMicros = %d; want 16146195", got.TotalAmountUSDMicros)
+	}
+}
+
 func TestGetPodBillingHistoryPreservesEmptyZeroCostEvidence(t *testing.T) {
 	const response = " [ ]\n"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -151,7 +184,8 @@ func TestGetPodBillingHistoryRefusesAmbiguousEvidence(t *testing.T) {
 		{name: "missing time", body: `[ {"amount":1,"podId":"pod-one","timeBilledMs":1} ]`, want: "omitted time", wantKind: "schema_ambiguity"},
 		{name: "missing billed time", body: `[ {"amount":1,"podId":"pod-one","time":"2026-08-25T10:00:00Z"} ]`, want: "omitted timeBilledMs", wantKind: "schema_ambiguity"},
 		{name: "foreign pod", body: `[ {"amount":1,"podId":"pod-two","time":"2026-08-25T10:00:00Z","timeBilledMs":1} ]`, want: "foreign pod", wantKind: "schema_ambiguity"},
-		{name: "sub micro", body: `[ {"amount":0.0000001,"podId":"pod-one","time":"2026-08-25T10:00:00Z","timeBilledMs":1} ]`, want: "sub-micro", wantKind: "submicro_amount"},
+		{name: "zoneless ISO time", body: `[ {"amount":1,"podId":"pod-one","time":"2026-08-25T10:00:00","timeBilledMs":1} ]`, want: "invalid time", wantKind: "schema_ambiguity"},
+		{name: "zoneless minute time", body: `[ {"amount":1,"podId":"pod-one","time":"2026-08-25 10:00","timeBilledMs":1} ]`, want: "invalid time", wantKind: "schema_ambiguity"},
 		{name: "amount overflow", body: `[ {"amount":"9223372036854.775808","podId":"pod-one","time":"2026-08-25T10:00:00Z","timeBilledMs":1} ]`, want: "exceeds int64", wantKind: "amount_overflow"},
 		{name: "negative billed time", body: `[ {"amount":1,"podId":"pod-one","time":"2026-08-25T10:00:00Z","timeBilledMs":-1} ]`, want: "negative timeBilledMs", wantKind: "schema_ambiguity"},
 		{name: "total overflow", body: `[{"amount":"9223372036854.775807","podId":"pod-one","time":"2026-08-25T10:00:00Z","timeBilledMs":1},{"amount":"0.000001","podId":"pod-one","time":"2026-08-25T11:00:00Z","timeBilledMs":1}]`, want: "total USD micros overflow", wantKind: "amount_overflow"},

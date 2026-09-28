@@ -70,8 +70,19 @@ func parseJSONUSDMicros(raw json.RawMessage) (int64, error) {
 
 // parseJSONUSDMicrosFloor is balance-only: RunPod reports account credits
 // beyond micro-USD precision. Flooring preserves a conservative purchasing
-// bound, while prices and billing records continue to require exact micros.
+// bound, while prices continue to require exact micros.
 func parseJSONUSDMicrosFloor(raw json.RawMessage) (int64, error) {
+	return parseJSONUSDMicrosRounded(raw, false)
+}
+
+// parseJSONUSDMicrosNearest is billing-only: RunPod computes charges in binary
+// floating point, so every real amount carries sub-micro digits. The exact
+// decimal rounds to the nearest micro, ties away from zero.
+func parseJSONUSDMicrosNearest(raw json.RawMessage) (int64, error) {
+	return parseJSONUSDMicrosRounded(raw, true)
+}
+
+func parseJSONUSDMicrosRounded(raw json.RawMessage, nearest bool) (int64, error) {
 	trimmed, err := parseJSONUSDDecimal(raw)
 	if err != nil {
 		return 0, err
@@ -83,7 +94,10 @@ func parseJSONUSDMicrosFloor(raw json.RawMessage) (int64, error) {
 	value.Mul(value, big.NewRat(usdMicrosPerUSD, 1))
 	quotient, remainder := new(big.Int), new(big.Int)
 	quotient.QuoRem(value.Num(), value.Denom(), remainder)
-	if value.Sign() < 0 && remainder.Sign() != 0 {
+	switch {
+	case nearest && new(big.Int).Lsh(new(big.Int).Abs(remainder), 1).Cmp(value.Denom()) >= 0:
+		quotient.Add(quotient, big.NewInt(int64(value.Sign())))
+	case !nearest && value.Sign() < 0 && remainder.Sign() != 0:
 		quotient.Sub(quotient, big.NewInt(1))
 	}
 	if !quotient.IsInt64() {
