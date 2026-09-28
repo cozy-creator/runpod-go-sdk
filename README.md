@@ -103,7 +103,7 @@ for _, record := range history.Records {
 // Persist history.NormalizedQuery and history.RawResponse as provider evidence.
 ```
 
-Amounts and the checked total are exact integer USD micros; signed records are preserved as provider corrections, never rounded through `float64`. The exact response is limited to 16 MiB. An empty array is valid zero-cost evidence, but it is not a provider finality assertion.
+RunPod reports bucket times as zoneless UTC (`2026-09-28 09:00:00`) and amounts as float-computed decimals. Each amount rounds from its exact decimal to the nearest USD micro (never through `float64`); signed records are preserved as provider corrections, and the total is their checked sum. The exact response is limited to 16 MiB. A bucket only includes charges recorded before `endTime`, so query past the pod's end for its complete charge. An empty array is valid zero-cost evidence, but it is not a provider finality assertion.
 
 Post-response qualification failures return `*PodBillingEvidenceError`. Its stable `Kind`, `NormalizedQuery`, and bounded exact `RawResponse` can be recorded without reparsing provider JSON; `response_too_large` carries no partial body.
 

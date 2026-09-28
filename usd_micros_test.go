@@ -61,6 +61,23 @@ func TestParseJSONUSDMicrosFloorIsConservative(t *testing.T) {
 	}
 }
 
+func TestParseJSONUSDMicrosNearestRoundsHalfAwayFromZero(t *testing.T) {
+	for raw, want := range map[string]int64{
+		`6.072548240656033`:  6_072_548,
+		`1.6644677189178765`: 1_664_468,
+		`0.0000005`:          1,
+		`"-0.0000005"`:       -1,
+		`0.00000049999`:      0,
+		`-0.0000001`:         0,
+		`"1e-6"`:             1,
+	} {
+		got, err := parseJSONUSDMicrosNearest(json.RawMessage(raw))
+		if err != nil || got != want {
+			t.Fatalf("parseJSONUSDMicrosNearest(%s) = %d, %v; want %d, nil", raw, got, err, want)
+		}
+	}
+}
+
 func TestUSDMicrosPerHourJSONUsesExactDollarDecimals(t *testing.T) {
 	for micros, want := range map[USDMicrosPerHour]string{
 		0: "0", 1: "0.000001", 250_000: "0.25", 1_000_001: "1.000001",
