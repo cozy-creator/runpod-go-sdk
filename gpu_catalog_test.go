@@ -15,6 +15,7 @@ func TestGPUCatalogSelection(t *testing.T) {
 	// Hardware facts for the CUDA 13 placement set match RunPod's live IDs.
 	wantSpecs := []runpod.GPUSpec{
 		{ID: "NVIDIA B200", DisplayName: "B200", VRAMGB: 180, SMCapability: 100},
+		{ID: "NVIDIA B300 SXM6 AC", DisplayName: "B300", VRAMGB: 288, SMCapability: 103},
 		{ID: "NVIDIA A100-SXM4-40GB", DisplayName: "A100 SXM 40GB", VRAMGB: 40, SMCapability: 80},
 		{ID: "NVIDIA GeForce RTX 3080 Ti", DisplayName: "RTX 3080 Ti", VRAMGB: 12, SMCapability: 86, Consumer: true},
 		{ID: "NVIDIA GeForce RTX 3090 Ti", DisplayName: "RTX 3090 Ti", VRAMGB: 24, SMCapability: 86, Consumer: true},

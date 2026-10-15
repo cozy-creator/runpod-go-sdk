@@ -68,6 +68,7 @@ var gpuCatalog = []GPUSpec{
 	{ID: "NVIDIA H100 NVL", DisplayName: "H100 NVL", VRAMGB: 94, SMCapability: 90},
 	{ID: "NVIDIA H200", DisplayName: "H200", VRAMGB: 141, SMCapability: 90},
 	{ID: "NVIDIA B200", DisplayName: "B200", VRAMGB: 180, SMCapability: 100},
+	{ID: "NVIDIA B300 SXM6 AC", DisplayName: "B300", VRAMGB: 288, SMCapability: 103},
 }
 
 // GPUCatalog returns a copy of the static GPU SKU catalog in fallback
