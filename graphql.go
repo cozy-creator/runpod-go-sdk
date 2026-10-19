@@ -76,6 +76,10 @@ func (c *Client) GraphQL(ctx context.Context, query string, variables map[string
 
 // graphQL preserves partial data and alias-scoped errors for batch queries.
 func (c *Client) graphQL(ctx context.Context, query string, variables map[string]interface{}) (graphQLResponse, error) {
+	return c.graphQLWithRetryLimit(ctx, query, variables, c.maxRetryAttempts)
+}
+
+func (c *Client) graphQLWithRetryLimit(ctx context.Context, query string, variables map[string]interface{}, maxRetries int) (graphQLResponse, error) {
 	if strings.TrimSpace(query) == "" {
 		return graphQLResponse{}, NewValidationError("query", "cannot be empty")
 	}
@@ -89,7 +93,11 @@ func (c *Client) graphQL(ctx context.Context, query string, variables map[string
 		Variables: variables,
 	}
 
-	resp, err := c.makeRequest(ctx, "POST", endpoint, req)
+	bodyJSON, err := json.Marshal(req)
+	if err != nil {
+		return graphQLResponse{}, fmt.Errorf("marshal GraphQL request: %w", err)
+	}
+	resp, err := c.makeRequestBytesWithRetryLimit(ctx, "POST", endpoint, bodyJSON, nil, maxRetries)
 	if err != nil {
 		return graphQLResponse{}, err
 	}

@@ -219,12 +219,16 @@ func (c *Client) makeRequestBytes(ctx context.Context, method, endpoint string, 
 }
 
 func (c *Client) makeRequestBytesWithHeaders(ctx context.Context, method, endpoint string, jsonBody []byte, headers http.Header) (*http.Response, error) {
+	return c.makeRequestBytesWithRetryLimit(ctx, method, endpoint, jsonBody, headers, c.maxRetryAttempts)
+}
+
+func (c *Client) makeRequestBytesWithRetryLimit(ctx context.Context, method, endpoint string, jsonBody []byte, headers http.Header, maxRetries int) (*http.Response, error) {
 
 	var lastErr error
 	var retryAfter time.Duration
 	var waited bool
 
-	for attempt := 0; attempt <= c.maxRetryAttempts; attempt++ {
+	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 && !waited {
 			select {
 			case <-ctx.Done():
@@ -265,7 +269,7 @@ func (c *Client) makeRequestBytesWithHeaders(ctx context.Context, method, endpoi
 				limited.Details = fmt.Sprintf("read rate-limit response: %v", readErr)
 			}
 			c.enrichRateLimit(until, limited)
-			if attempt == c.maxRetryAttempts {
+			if attempt == maxRetries {
 				return nil, limited
 			}
 			if err := c.waitRateLimit(ctx); err != nil {
@@ -275,7 +279,7 @@ func (c *Client) makeRequestBytesWithHeaders(ctx context.Context, method, endpoi
 			continue
 		}
 
-		if c.isRetryableHTTPStatus(method, resp.StatusCode) && attempt < c.maxRetryAttempts {
+		if c.isRetryableHTTPStatus(method, resp.StatusCode) && attempt < maxRetries {
 			retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
 			resp.Body.Close()
 			lastErr = fmt.Errorf("HTTP %d: retryable server error", resp.StatusCode)
@@ -289,7 +293,7 @@ func (c *Client) makeRequestBytesWithHeaders(ctx context.Context, method, endpoi
 		return resp, nil
 	}
 
-	return nil, fmt.Errorf("request failed after %d attempts: %w", c.maxRetryAttempts+1, lastErr)
+	return nil, fmt.Errorf("request failed after %d attempts: %w", maxRetries+1, lastErr)
 }
 
 // backoff computes the wait before retry `attempt` (1-based). A
