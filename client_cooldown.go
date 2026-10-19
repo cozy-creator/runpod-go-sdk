@@ -22,12 +22,24 @@ func (c *clientCooldown) now() time.Time {
 	return time.Now()
 }
 
-func (c *Client) retainRateLimit(err *APIError, delay time.Duration) {
+func (c *Client) retainRateLimit(err *APIError, delay time.Duration) time.Time {
 	until := c.cooldown.now().Add(delay)
 	c.cooldown.mu.Lock()
 	defer c.cooldown.mu.Unlock()
 	if until.After(c.cooldown.until) {
 		c.cooldown.until = until
+		c.cooldown.err = *err
+		c.cooldown.err.ResponseBody = append([]byte(nil), err.ResponseBody...)
+	}
+	return until
+}
+
+// Reading the provider's body adds diagnostics, never more cooldown time or
+// replacement of a later, longer limit observed by another in-flight request.
+func (c *Client) enrichRateLimit(until time.Time, err *APIError) {
+	c.cooldown.mu.Lock()
+	defer c.cooldown.mu.Unlock()
+	if c.cooldown.until.Equal(until) {
 		c.cooldown.err = *err
 		c.cooldown.err.ResponseBody = append([]byte(nil), err.ResponseBody...)
 	}

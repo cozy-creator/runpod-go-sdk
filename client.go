@@ -253,13 +253,18 @@ func (c *Client) makeRequestBytesWithHeaders(ctx context.Context, method, endpoi
 		}
 
 		if resp.StatusCode == http.StatusTooManyRequests {
+			// Suppress later calls as soon as headers arrive, even if this
+			// response body stalls or the caller cancels while reading it.
+			headerLimit := c.parseErrorResponse(resp.StatusCode, resp.Header, nil).(*APIError)
+			until := c.retainRateLimit(headerLimit, c.backoff(attempt+1, headerLimit.RetryAfter))
 			body, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			limited := c.parseErrorResponse(resp.StatusCode, resp.Header, body).(*APIError)
+			limited.RetryAfter = headerLimit.RetryAfter
 			if readErr != nil {
 				limited.Details = fmt.Sprintf("read rate-limit response: %v", readErr)
 			}
-			c.retainRateLimit(limited, c.backoff(attempt+1, limited.RetryAfter))
+			c.enrichRateLimit(until, limited)
 			if attempt == c.maxRetryAttempts {
 				return nil, limited
 			}

@@ -16,6 +16,52 @@ type cooldownTransport func(*http.Request) (*http.Response, error)
 
 func (f cooldownTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+type cooldownBlockedBody struct {
+	reader  io.Reader
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *cooldownBlockedBody) Read(p []byte) (int, error) {
+	b.once.Do(func() { close(b.entered); <-b.release })
+	return b.reader.Read(p)
+}
+func (*cooldownBlockedBody) Close() error { return nil }
+
+func TestCooldownBeginsAtHeadersBeforeBlockedResponseBody(t *testing.T) {
+	var now atomic.Int64
+	now.Store(time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC).UnixNano())
+	var hits atomic.Int32
+	body := &cooldownBlockedBody{reader: strings.NewReader(`{"message":"original provider limit","code":"FIRST"}`), entered: make(chan struct{}), release: make(chan struct{})}
+	client, _ := NewClient("fixture", WithMaxRetryAttempts(0), WithHTTPClient(&http.Client{Transport: cooldownTransport(func(r *http.Request) (*http.Response, error) {
+		var responseBody io.ReadCloser = http.NoBody
+		if hits.Add(1) == 1 {
+			responseBody = body
+		}
+		return &http.Response{StatusCode: 429, Header: http.Header{"Retry-After": {"6000"}}, Body: responseBody, Request: r}, nil
+	})}))
+	client.cooldown.clock = func() time.Time { return time.Unix(0, now.Load()) }
+	finished := make(chan error, 1)
+	go func() { finished <- client.Get(t.Context(), "/pods", nil) }()
+	<-body.entered
+	now.Add(int64(100 * time.Second))
+	second := client.GraphQL(t.Context(), "query { myself { id } }", nil, nil)
+	close(body.release)
+	first := <-finished
+	var original *APIError
+	if !errors.As(first, &original) || original.Code != "FIRST" {
+		t.Fatalf("lost original response: %v", first)
+	}
+	var limited *APIError
+	if !errors.As(second, &limited) || limited.RetryAfter != 5900*time.Second || hits.Load() != 1 {
+		t.Fatalf("blocked body delayed suppression: hits=%d err=%+v", hits.Load(), limited)
+	}
+	if current := client.rateLimited(); current == nil || current.RetryAfter != 5900*time.Second || current.Code != "FIRST" {
+		t.Fatalf("body read extended deadline/lost diagnostics: %+v", current)
+	}
+}
+
 func TestCooldownClockExpiryAndConcurrentCallers(t *testing.T) {
 	var now atomic.Int64
 	now.Store(time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC).UnixNano())
