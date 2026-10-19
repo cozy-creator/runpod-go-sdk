@@ -48,6 +48,8 @@ A 429 retains a cooldown across all REST and GraphQL calls on that client. Later
 
 Inventory refreshes use `ObserveInventory(ctx, InventoryRequest{Availability: ..., GPUOffers: ..., CPUOffers: ...})`: all requested census, GPU price and CPU quote roots share **one HTTP attempt**, with no automatic retry. The caller owns its refresh interval. Results follow input order and carry `DataCenters`/`Offers`/`Offer` plus `Err` for a failed alias scoped by root; transport or unscoped GraphQL failures return at method level. `GPUOfferFilter.CloudType` selects `SECURE` or `COMMUNITY`; empty keeps both clouds. The individual `ListDataCentersBatch`, `ListGPUOffersBatch` and `GetCPUOffersBatch` methods delegate to this operation when only one root is needed. All forms use the single-quote exact price and resource validators.
 
+Set `InventoryRequest.NetworkVolumes=true` to include the account's volume IDs, names, sizes and datacenters in that same HTTP request. `InventoryResult.NetworkVolumesErr` preserves a scoped volume-read failure without discarding valid market results. A missing/null requested root, list or required row field is an error; a valid empty list is known absence. Existing REST volume APIs remain independent lifecycle operations.
+
 ## Pods
 
 | Function | Description |

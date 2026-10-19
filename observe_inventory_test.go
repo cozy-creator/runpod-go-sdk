@@ -109,6 +109,12 @@ func inventoryResponseFixture(t *testing.T, w http.ResponseWriter, r *http.Reque
 		}
 		data["cpuFlavors"] = []interface{}{row}
 	}
+	if strings.Contains(request.Query, "myself{") {
+		if strings.Count(request.Query, "myself{") != 1 {
+			t.Error("repeated account root")
+		}
+		data["myself"] = map[string]interface{}{"networkVolumes": []map[string]interface{}{{"id": "volume-one", "name": "cozy-cache-DC-1", "size": 500, "dataCenterId": "DC-1"}}}
+	}
 	body := map[string]interface{}{"data": data}
 	if failedRoot != "" {
 		body["errors"] = []map[string]interface{}{{"message": "one alias unavailable", "path": []interface{}{failedRoot, 0, "q0"}, "extensions": map[string]string{"code": "ONE_ALIAS"}}}
@@ -122,6 +128,7 @@ func TestObserveInventoryUsesOneHTTPForFiveWidthsGPUPricesAnd104CPUOffers(t *tes
 	defer server.Close()
 	client := mustClient(t, "fixture", runpod.WithGraphQLBaseURL(server.URL))
 	request := inventoryRequestFixture()
+	request.NetworkVolumes = true
 	result, err := client.ObserveInventory(t.Context(), request)
 	if err != nil || len(result.DataCenters) != 5 || len(result.GPUOffers) != 3 || len(result.CPUOffers) != 104 {
 		t.Fatalf("combined observation: counts%d/%d/%d err=%v", len(result.DataCenters), len(result.GPUOffers), len(result.CPUOffers), err)
@@ -149,6 +156,9 @@ func TestObserveInventoryUsesOneHTTPForFiveWidthsGPUPricesAnd104CPUOffers(t *tes
 		if item.Err != nil || item.Offer.CPUInstanceID != request.CPUOffers[i].InstanceID || item.Offer.DataCenterID != request.CPUOffers[i].DataCenterID || item.Offer.OnDemandPriceUSDMicrosPerHour != 70001 {
 			t.Fatalf("CPU%d: %+v", i, item)
 		}
+	}
+	if result.NetworkVolumesErr != nil || len(result.NetworkVolumes) != 1 || result.NetworkVolumes[0].ID != "volume-one" || result.NetworkVolumes[0].Size != 500 || result.NetworkVolumes[0].DataCenterID != "DC-1" {
+		t.Fatalf("volume snapshot: %+v %v", result.NetworkVolumes, result.NetworkVolumesErr)
 	}
 	if hits.Load() != 1 {
 		t.Fatalf("combined inventory sent%d HTTP requests; hard limit is one", hits.Load())

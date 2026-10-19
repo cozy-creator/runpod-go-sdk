@@ -25,16 +25,19 @@ type CPUOfferResult struct {
 
 // InventoryRequest is one observation of all configured widths, prices and CPU shapes.
 type InventoryRequest struct {
-	Availability []GPUAvailabilityFilter
-	GPUOffers    []GPUOfferFilter
-	CPUOffers    []CPUOfferRequest
+	Availability   []GPUAvailabilityFilter
+	GPUOffers      []GPUOfferFilter
+	CPUOffers      []CPUOfferRequest
+	NetworkVolumes bool
 }
 
 // InventoryResult follows the input order independently within each root.
 type InventoryResult struct {
-	DataCenters []DataCentersResult
-	GPUOffers   []GPUOffersResult
-	CPUOffers   []CPUOfferResult
+	DataCenters       []DataCentersResult
+	GPUOffers         []GPUOffersResult
+	CPUOffers         []CPUOfferResult
+	NetworkVolumes    []NetworkVolume
+	NetworkVolumesErr error
 }
 
 type inventorySelection struct {
@@ -77,6 +80,9 @@ func (c *Client) ObserveInventory(ctx context.Context, request InventoryRequest)
 		}
 		selections = append(selections, selection)
 	}
+	if request.NetworkVolumes {
+		selections = append(selections, inventorySelection{root: "myself", fields: "networkVolumes{id name size dataCenterId}"})
+	}
 	if len(selections) == 0 {
 		return result, nil
 	}
@@ -91,7 +97,11 @@ func (c *Client) ObserveInventory(ctx context.Context, request InventoryRequest)
 		}
 		failuresByRoot[selection.root] = nil
 	}
-	query := "query(" + strings.Join(definitions, ",") + "){" + strings.Join(roots, " ") + "}"
+	query := "query"
+	if len(definitions) > 0 {
+		query += "(" + strings.Join(definitions, ",") + ")"
+	}
+	query += "{" + strings.Join(roots, " ") + "}"
 	envelope, err := c.graphQLWithRetryLimit(ctx, query, variables, 0)
 	if err != nil {
 		return InventoryResult{}, err
@@ -111,6 +121,10 @@ func (c *Client) ObserveInventory(ctx context.Context, request InventoryRequest)
 		return InventoryResult{}, fmt.Errorf("decode batch data: %w", err)
 	}
 	for _, selection := range selections {
+		if selection.root == "myself" {
+			result.NetworkVolumes, result.NetworkVolumesErr = decodeInventoryNetworkVolumes(data["myself"], failuresByRoot["myself"])
+			continue
+		}
 		count := len(request.Availability)
 		switch selection.root {
 		case "gpuTypes":
@@ -132,6 +146,45 @@ func (c *Client) ObserveInventory(ctx context.Context, request InventoryRequest)
 		}
 	}
 	return result, nil
+}
+
+// An unavailable account snapshot must never become an empty list: cache
+// reconciliation uses complete absence as evidence that no volume exists.
+func decodeInventoryNetworkVolumes(myself json.RawMessage, failures []GraphQLError) ([]NetworkVolume, error) {
+	if len(failures) > 0 {
+		return nil, &GraphQLResponseError{Errors: failures}
+	}
+	if len(myself) == 0 || string(myself) == "null" {
+		return nil, fmt.Errorf("RunPod inventory omitted myself")
+	}
+	var account map[string]json.RawMessage
+	if err := json.Unmarshal(myself, &account); err != nil {
+		return nil, fmt.Errorf("decode RunPod inventory account: %w", err)
+	}
+	raw, exists := account["networkVolumes"]
+	if !exists || string(raw) == "null" {
+		return nil, fmt.Errorf("RunPod inventory omitted networkVolumes")
+	}
+	var rows []struct {
+		ID           *string `json:"id"`
+		Name         *string `json:"name"`
+		Size         *int    `json:"size"`
+		DataCenterID *string `json:"dataCenterId"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, fmt.Errorf("decode RunPod inventory volumes: %w", err)
+	}
+	if rows == nil {
+		return nil, fmt.Errorf("RunPod inventory returned null networkVolumes")
+	}
+	volumes := make([]NetworkVolume, len(rows))
+	for i, row := range rows {
+		if row.ID == nil || row.Name == nil || row.Size == nil || row.DataCenterID == nil {
+			return nil, fmt.Errorf("RunPod inventory volume%d omitted a required field", i)
+		}
+		volumes[i] = NetworkVolume{ID: *row.ID, Name: *row.Name, Size: *row.Size, DataCenterID: *row.DataCenterID}
+	}
+	return volumes, nil
 }
 
 // ListDataCentersBatch quotes widths alone. Use ObserveInventory to combine roots.
