@@ -55,41 +55,9 @@ type graphQLResponse struct {
 
 // GraphQL executes a typed GraphQL request against RunPod's GraphQL API.
 func (c *Client) GraphQL(ctx context.Context, query string, variables map[string]interface{}, result interface{}) error {
-	if strings.TrimSpace(query) == "" {
-		return NewValidationError("query", "cannot be empty")
-	}
-
-	endpoint := strings.TrimSpace(c.graphqlBaseURL)
-	if endpoint == "" {
-		endpoint = DefaultGraphQLBaseURL
-	}
-	req := graphQLRequest{
-		Query:     query,
-		Variables: variables,
-	}
-
-	resp, err := c.makeRequest(ctx, "POST", endpoint, req)
+	envelope, err := c.graphQL(ctx, query, variables)
 	if err != nil {
 		return err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read GraphQL response body: %w", err)
-	}
-
-	if c.debug {
-		c.logger.Printf("[DEBUG] GraphQL response status=%d body=%s", resp.StatusCode, string(body))
-	}
-
-	if resp.StatusCode >= 400 {
-		return c.parseErrorResponse(resp.StatusCode, resp.Header, body)
-	}
-
-	var envelope graphQLResponse
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return fmt.Errorf("failed to unmarshal GraphQL response envelope: %w", err)
 	}
 
 	if len(envelope.Errors) > 0 {
@@ -104,4 +72,46 @@ func (c *Client) GraphQL(ctx context.Context, query string, variables map[string
 		return fmt.Errorf("failed to unmarshal GraphQL data payload: %w", err)
 	}
 	return nil
+}
+
+// graphQL preserves partial data and alias-scoped errors for batch queries.
+func (c *Client) graphQL(ctx context.Context, query string, variables map[string]interface{}) (graphQLResponse, error) {
+	if strings.TrimSpace(query) == "" {
+		return graphQLResponse{}, NewValidationError("query", "cannot be empty")
+	}
+
+	endpoint := strings.TrimSpace(c.graphqlBaseURL)
+	if endpoint == "" {
+		endpoint = DefaultGraphQLBaseURL
+	}
+	req := graphQLRequest{
+		Query:     query,
+		Variables: variables,
+	}
+
+	resp, err := c.makeRequest(ctx, "POST", endpoint, req)
+	if err != nil {
+		return graphQLResponse{}, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return graphQLResponse{}, fmt.Errorf("failed to read GraphQL response body: %w", err)
+	}
+
+	if c.debug {
+		c.logger.Printf("[DEBUG] GraphQL response status=%d body=%s", resp.StatusCode, string(body))
+	}
+
+	if resp.StatusCode >= 400 {
+		return graphQLResponse{}, c.parseErrorResponse(resp.StatusCode, resp.Header, body)
+	}
+
+	var envelope graphQLResponse
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return graphQLResponse{}, fmt.Errorf("failed to unmarshal GraphQL response envelope: %w", err)
+	}
+
+	return envelope, nil
 }

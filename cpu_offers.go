@@ -58,22 +58,10 @@ type graphQLCPUOfferPayload struct {
 // directly to integer micros; sub-micro and overflowing rates refuse.
 func (c *Client) GetCPUOffer(ctx context.Context, request CPUOfferRequest) (CPUOffer, error) {
 	var out CPUOffer
-	instanceID := strings.TrimSpace(request.InstanceID)
-	dataCenterID := strings.TrimSpace(request.DataCenterID)
-	match := cpuInstanceIDPattern.FindStringSubmatch(instanceID)
-	if len(match) != 4 {
-		return out, NewValidationError("instanceId", "must use the family-vCPU-RAM spelling, for example cpu5c-2-4")
+	if err := validateCPUOfferRequest(request); err != nil {
+		return out, err
 	}
-	familyID := match[1]
-	if _, ok := CPUFamilyByID(familyID); !ok {
-		return out, NewValidationErrorWithValue("instanceId", "names an unknown CPU family", instanceID)
-	}
-	if dataCenterID == "" {
-		return out, NewValidationError("dataCenterId", "cannot be empty")
-	}
-	vcpu, _ := strconv.Atoi(match[2])
-	memory, _ := strconv.Atoi(match[3])
-
+	instanceID, dataCenterID := strings.TrimSpace(request.InstanceID), strings.TrimSpace(request.DataCenterID)
 	query := `
 query($instanceId: String!, $dataCenterId: String!) {
   cpuFlavors {
@@ -95,6 +83,20 @@ query($instanceId: String!, $dataCenterId: String!) {
 	}, &payload); err != nil {
 		return out, fmt.Errorf("failed to quote CPU offer: %w", err)
 	}
+
+	return decodeCPUOffer(payload, request)
+}
+
+func decodeCPUOffer(payload graphQLCPUOfferPayload, request CPUOfferRequest) (CPUOffer, error) {
+	var out CPUOffer
+	if err := validateCPUOfferRequest(request); err != nil {
+		return out, err
+	}
+	instanceID, dataCenterID := strings.TrimSpace(request.InstanceID), strings.TrimSpace(request.DataCenterID)
+	match := cpuInstanceIDPattern.FindStringSubmatch(instanceID)
+	familyID := match[1]
+	vcpu, _ := strconv.Atoi(match[2])
+	memory, _ := strconv.Atoi(match[3])
 
 	matches := 0
 	for _, flavor := range payload.CPUFlavors {
@@ -134,4 +136,21 @@ query($instanceId: String!, $dataCenterId: String!) {
 		return CPUOffer{}, fmt.Errorf("RunPod returned %d CPU flavor rows for %s", matches, familyID)
 	}
 	return out, nil
+}
+
+func validateCPUOfferRequest(request CPUOfferRequest) error {
+	instanceID := strings.TrimSpace(request.InstanceID)
+	dataCenterID := strings.TrimSpace(request.DataCenterID)
+	match := cpuInstanceIDPattern.FindStringSubmatch(instanceID)
+	if len(match) != 4 {
+		return NewValidationError("instanceId", "must use the family-vCPU-RAM spelling, for example cpu5c-2-4")
+	}
+	familyID := match[1]
+	if _, ok := CPUFamilyByID(familyID); !ok {
+		return NewValidationErrorWithValue("instanceId", "names an unknown CPU family", instanceID)
+	}
+	if dataCenterID == "" {
+		return NewValidationError("dataCenterId", "cannot be empty")
+	}
+	return nil
 }

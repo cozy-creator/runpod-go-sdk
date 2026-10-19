@@ -51,6 +51,8 @@ func (o GPUOffer) MinimumBidPerGPUUSDMicrosPerHour() (USDMicrosPerHour, bool) {
 // GPUOfferFilter constrains ListGPUOffers. Zero value = all offers for one
 // GPU.
 type GPUOfferFilter struct {
+	// CloudType limits the quote to SECURE or COMMUNITY; empty preserves both.
+	CloudType string
 	// GPUCount prices the offer for this many GPUs per pod (default 1).
 	GPUCount int
 	// MinCudaVersion filters to machines with at least this CUDA version.
@@ -115,21 +117,8 @@ func (c *Client) ListGPUOffers(ctx context.Context, filter *GPUOfferFilter) ([]G
 	inStockOnly := false
 	idSet := map[string]struct{}{}
 	if filter != nil {
-		switch {
-		case filter.GPUCount < 0:
-			return nil, NewValidationError("gpuCount", "cannot be negative")
-		case filter.MinMemoryInGB < 0:
-			return nil, NewValidationError("minMemoryInGb", "cannot be negative")
-		case filter.MinVCPUCount < 0:
-			return nil, NewValidationError("minVcpuCount", "cannot be negative")
-		case filter.MinDisk < 0:
-			return nil, NewValidationError("minDisk", "cannot be negative")
-		case filter.MinDownloadMbps < 0:
-			return nil, NewValidationError("minDownload", "cannot be negative")
-		case filter.MinUploadMbps < 0:
-			return nil, NewValidationError("minUpload", "cannot be negative")
-		case filter.TotalDisk < 0:
-			return nil, NewValidationError("totalDisk", "cannot be negative")
+		if err := validateGPUOfferFilter(filter); err != nil {
+			return nil, err
 		}
 		if filter.GPUCount > 0 {
 			gpuCount = filter.GPUCount
@@ -187,6 +176,13 @@ query($gpuCount: Int!, $minCudaVersion: String, $allowedCudaVersions: [String], 
 		return nil, fmt.Errorf("failed to list GPU offers: %w", err)
 	}
 
+	if filter == nil {
+		filter = &GPUOfferFilter{}
+	}
+	return decodeGPUOffers(payload, gpuCount, idSet, inStockOnly, *filter)
+}
+
+func decodeGPUOffers(payload graphQLGPUOfferPayload, gpuCount int, idSet map[string]struct{}, inStockOnly bool, filter GPUOfferFilter) ([]GPUOffer, error) {
 	var offers []GPUOffer
 	for _, gpu := range payload.GPUTypes {
 		if len(idSet) > 0 {
@@ -222,10 +218,10 @@ query($gpuCount: Int!, $minCudaVersion: String, $allowedCudaVersions: [String], 
 				AvailableGPUCounts:              append([]int(nil), price.AvailableGPUCounts...),
 			})
 		}
-		if gpu.SecureCloud {
+		if gpu.SecureCloud && (filter.CloudType == "" || filter.CloudType == "SECURE") {
 			add("SECURE", secure)
 		}
-		if gpu.CommunityCloud {
+		if gpu.CommunityCloud && (filter.CloudType == "" || filter.CloudType == "COMMUNITY") {
 			add("COMMUNITY", community)
 		}
 	}
@@ -238,4 +234,27 @@ query($gpuCount: Int!, $minCudaVersion: String, $allowedCudaVersions: [String], 
 	})
 
 	return offers, nil
+}
+
+func validateGPUOfferFilter(filter *GPUOfferFilter) error {
+	switch {
+	case filter.GPUCount < 0:
+		return NewValidationError("gpuCount", "cannot be negative")
+	case filter.MinMemoryInGB < 0:
+		return NewValidationError("minMemoryInGb", "cannot be negative")
+	case filter.MinVCPUCount < 0:
+		return NewValidationError("minVcpuCount", "cannot be negative")
+	case filter.MinDisk < 0:
+		return NewValidationError("minDisk", "cannot be negative")
+	case filter.MinDownloadMbps < 0:
+		return NewValidationError("minDownload", "cannot be negative")
+	case filter.MinUploadMbps < 0:
+		return NewValidationError("minUpload", "cannot be negative")
+	case filter.TotalDisk < 0:
+		return NewValidationError("totalDisk", "cannot be negative")
+	}
+	if filter.CloudType != "" && filter.CloudType != "SECURE" && filter.CloudType != "COMMUNITY" {
+		return NewValidationError("cloudType", "must be SECURE or COMMUNITY")
+	}
+	return nil
 }

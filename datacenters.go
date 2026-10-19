@@ -55,17 +55,8 @@ type graphQLDataCenterPayload struct {
 // snapshot. It performs one bounded GraphQL request; caching, refresh cadence,
 // and placement-failure policy belong to the orchestrator, not the SDK.
 func (c *Client) ListDataCenters(ctx context.Context, filter *GPUAvailabilityFilter) ([]DataCenter, error) {
-	if filter != nil {
-		switch {
-		case filter.GPUCount < 0:
-			return nil, NewValidationError("gpuCount", "cannot be negative")
-		case filter.MinDisk < 0:
-			return nil, NewValidationError("minDisk", "cannot be negative")
-		case filter.MinMemoryInGB < 0:
-			return nil, NewValidationError("minMemoryInGb", "cannot be negative")
-		case filter.MinVCPUCount < 0:
-			return nil, NewValidationError("minVcpuCount", "cannot be negative")
-		}
+	if err := validateGPUAvailabilityFilter(filter); err != nil {
+		return nil, err
 	}
 	const query = `
 query($input: GpuAvailabilityInput) {
@@ -92,4 +83,20 @@ query($input: GpuAvailabilityInput) {
 		return nil, fmt.Errorf("failed to list data centers: %w", err)
 	}
 	return payload.DataCenters, nil
+}
+
+func validateGPUAvailabilityFilter(filter *GPUAvailabilityFilter) error {
+	if filter != nil {
+		switch {
+		case filter.GPUCount < 0:
+			return NewValidationError("gpuCount", "cannot be negative")
+		case filter.MinDisk < 0:
+			return NewValidationError("minDisk", "cannot be negative")
+		case filter.MinMemoryInGB < 0:
+			return NewValidationError("minMemoryInGb", "cannot be negative")
+		case filter.MinVCPUCount < 0:
+			return NewValidationError("minVcpuCount", "cannot be negative")
+		}
+	}
+	return nil
 }

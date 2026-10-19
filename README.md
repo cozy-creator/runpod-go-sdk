@@ -46,6 +46,8 @@ Retries: GETs and other idempotent requests retry on 5xx/429 with exponential ba
 
 A 429 retains a cooldown across all REST and GraphQL calls on that client. Later calls return `ErrRateLimited` with the remaining `APIError.RetryAfter` without sending HTTP. The receiving call retries short waits; waits above 30 seconds or beyond its context return the original typed 429 immediately. Canceling a call does not erase the cooldown. Separate clients remain independent.
 
+Inventory refreshes can use `ListDataCentersBatch`, `ListGPUOffersBatch` and `GetCPUOffersBatch`: each nonempty batch sends one GraphQL request with a shared root and aliases. Results follow input order and carry `DataCenters`/`Offers`/`Offer` plus `Err` for a failed alias; transport or unscoped GraphQL failures return at method level. `GPUOfferFilter.CloudType` selects `SECURE` or `COMMUNITY`; empty keeps both clouds. These APIs use the single-quote exact price and resource validators.
+
 ## Pods
 
 | Function | Description |
