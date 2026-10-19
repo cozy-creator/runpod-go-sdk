@@ -44,6 +44,8 @@ client, err := runpod.NewClient(apiKey,
 
 Retries: GETs and other idempotent requests retry on 5xx/429 with exponential backoff and jitter, honoring `Retry-After` on 429. POSTs never retry on 5xx (not idempotent, and RunPod uses 500 for ordinary stock-outs).
 
+A 429 retains a cooldown across all REST and GraphQL calls on that client. Later calls return `ErrRateLimited` with the remaining `APIError.RetryAfter` without sending HTTP. The receiving call retries short waits; waits above 30 seconds or beyond its context return the original typed 429 immediately. Canceling a call does not erase the cooldown. Separate clients remain independent.
+
 ## Pods
 
 | Function | Description |

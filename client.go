@@ -63,7 +63,8 @@ type Client struct {
 	maxRetryAttempts int
 	retryDelay       time.Duration
 
-	logger Logger
+	logger   Logger
+	cooldown clientCooldown
 }
 
 // Logger interface for custom logging
@@ -221,15 +222,20 @@ func (c *Client) makeRequestBytesWithHeaders(ctx context.Context, method, endpoi
 
 	var lastErr error
 	var retryAfter time.Duration
+	var waited bool
 
 	for attempt := 0; attempt <= c.maxRetryAttempts; attempt++ {
-		if attempt > 0 {
+		if attempt > 0 && !waited {
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			case <-time.After(c.backoff(attempt, retryAfter)):
 			}
 			retryAfter = 0
+		}
+		waited = false
+		if limited := c.rateLimited(); limited != nil {
+			return nil, limited
 		}
 
 		resp, err := c.doRequestWithHeaders(ctx, method, endpoint, jsonBody, headers)
@@ -243,6 +249,24 @@ func (c *Client) makeRequestBytesWithHeaders(ctx context.Context, method, endpoi
 			if c.debug {
 				c.logger.Printf("[DEBUG] Request attempt %d failed, retrying: %v", attempt+1, err)
 			}
+			continue
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			body, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			limited := c.parseErrorResponse(resp.StatusCode, resp.Header, body).(*APIError)
+			if readErr != nil {
+				limited.Details = fmt.Sprintf("read rate-limit response: %v", readErr)
+			}
+			c.retainRateLimit(limited, c.backoff(attempt+1, limited.RetryAfter))
+			if attempt == c.maxRetryAttempts {
+				return nil, limited
+			}
+			if err := c.waitRateLimit(ctx); err != nil {
+				return nil, limited
+			}
+			waited = true
 			continue
 		}
 
@@ -287,6 +311,10 @@ func (c *Client) backoff(attempt int, retryAfter time.Duration) time.Duration {
 // parseRetryAfter parses a Retry-After header value: either delay-seconds or
 // an HTTP date. Returns 0 when absent/unparseable.
 func parseRetryAfter(v string) time.Duration {
+	return parseRetryAfterAt(v, time.Now())
+}
+
+func parseRetryAfterAt(v string, now time.Time) time.Duration {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return 0
@@ -295,7 +323,7 @@ func parseRetryAfter(v string) time.Duration {
 		return time.Duration(secs) * time.Second
 	}
 	if t, err := http.ParseTime(v); err == nil {
-		if d := time.Until(t); d > 0 {
+		if d := t.Sub(now); d > 0 {
 			return d
 		}
 	}
@@ -396,7 +424,7 @@ func (c *Client) handleResponse(resp *http.Response, v interface{}) error {
 func (c *Client) parseErrorResponse(statusCode int, header http.Header, body []byte) error {
 	var retryAfter time.Duration
 	if statusCode == 429 {
-		retryAfter = parseRetryAfter(header.Get("Retry-After"))
+		retryAfter = parseRetryAfterAt(header.Get("Retry-After"), c.cooldown.now())
 	}
 
 	// Try to parse as structured API error.
