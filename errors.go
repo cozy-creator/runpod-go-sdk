@@ -17,7 +17,7 @@ var (
 	ErrIncompleteReadback = errors.New("runpod: incomplete pod readback")
 	// ErrUnauthorized matches 401/403 responses (bad API key / permissions).
 	ErrUnauthorized = errors.New("runpod: unauthorized")
-	// ErrRateLimited matches 429 responses.
+	// ErrRateLimited matches 429 responses and calls refused while a quota cools down.
 	ErrRateLimited = errors.New("runpod: rate limited")
 	// ErrNoCapacity matches capacity-related pod-create failures. RunPod
 	// signals stock-outs as HTTP 500 with a "no instances available" style
@@ -38,7 +38,7 @@ type APIError struct {
 	// convenient while this prevents unknown diagnostics from being dropped.
 	ResponseBody json.RawMessage `json:"-"`
 
-	// RetryAfter is populated from the Retry-After header on 429 responses.
+	// RetryAfter is the longest of Retry-After and every exhausted RateLimit window on 429.
 	RetryAfter time.Duration `json:"-"`
 }
 

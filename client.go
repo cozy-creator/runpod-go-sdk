@@ -278,6 +278,13 @@ func (c *Client) makeRequestBytesWithRetryLimit(ctx context.Context, method, end
 			waited = true
 			continue
 		}
+		// An answer that spends a quota window's last request is returned unchanged; every
+		// later call waits for the window to reset.
+		if delay := quotaDelay(resp.Header); delay > 0 {
+			c.retainRateLimit(&APIError{StatusCode: http.StatusTooManyRequests,
+				Message: fmt.Sprintf("RunPod quota exhausted (declared on HTTP %d)", resp.StatusCode)}, delay)
+			return resp, nil
+		}
 
 		if c.isRetryableHTTPStatus(method, resp.StatusCode) && attempt < maxRetries {
 			retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
@@ -328,8 +335,8 @@ func parseRetryAfterAt(v string, now time.Time) time.Duration {
 	if v == "" {
 		return 0
 	}
-	if secs, err := strconv.Atoi(v); err == nil && secs >= 0 {
-		return time.Duration(secs) * time.Second
+	if delay, ok := delaySeconds(v); ok {
+		return delay
 	}
 	if t, err := http.ParseTime(v); err == nil {
 		if d := t.Sub(now); d > 0 {
@@ -433,7 +440,7 @@ func (c *Client) handleResponse(resp *http.Response, v interface{}) error {
 func (c *Client) parseErrorResponse(statusCode int, header http.Header, body []byte) error {
 	var retryAfter time.Duration
 	if statusCode == 429 {
-		retryAfter = parseRetryAfterAt(header.Get("Retry-After"), c.cooldown.now())
+		retryAfter = max(parseRetryAfterAt(header.Get("Retry-After"), c.cooldown.now()), quotaDelay(header))
 	}
 
 	// Try to parse as structured API error.
