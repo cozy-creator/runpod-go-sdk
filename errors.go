@@ -43,16 +43,18 @@ type APIError struct {
 }
 
 func (e *APIError) Error() string {
+	text := fmt.Sprintf("RunPod API Error %d", e.StatusCode)
 	if e.Code != "" {
-		if e.Details != "" {
-			return fmt.Sprintf("RunPod API Error %d (%s): %s - %s", e.StatusCode, e.Code, e.Message, e.Details)
-		}
-		return fmt.Sprintf("RunPod API Error %d (%s): %s", e.StatusCode, e.Code, e.Message)
+		text += " (" + e.Code + ")"
 	}
+	text += ": " + e.Message
 	if e.Details != "" {
-		return fmt.Sprintf("RunPod API Error %d: %s - %s", e.StatusCode, e.Message, e.Details)
+		text += " - " + e.Details
 	}
-	return fmt.Sprintf("RunPod API Error %d: %s", e.StatusCode, e.Message)
+	if e.RetryAfter > 0 {
+		text += fmt.Sprintf(" (retry after %s)", e.RetryAfter.Round(time.Second))
+	}
+	return text
 }
 
 // Is maps status codes onto the package sentinels for errors.Is.

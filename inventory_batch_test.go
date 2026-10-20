@@ -71,7 +71,7 @@ func TestInventoryBatchesShareRootsAndQuote104CPUShapes(t *testing.T) {
 				t.Error("repeated CPU root")
 			}
 			row := map[string]interface{}{"id": "cpu5c", "displayName": "CPU", "minVcpu": 1, "maxVcpu": 64, "ramMultiplier": 2, "diskLimitPerVcpu": 10}
-			for i := range 104 {
+			for i := 0; req.Variables[fmt.Sprintf("instanceId%d", i)] != nil; i++ {
 				var instance, center string
 				_ = json.Unmarshal(req.Variables[fmt.Sprintf("instanceId%d", i)], &instance)
 				_ = json.Unmarshal(req.Variables[fmt.Sprintf("dataCenterId%d", i)], &center)
@@ -138,8 +138,8 @@ func TestInventoryBatchesShareRootsAndQuote104CPUShapes(t *testing.T) {
 			t.Fatalf("CPU alias%d: %+v", i, result)
 		}
 	}
-	if hits.Load() != 3 {
-		t.Fatalf("three batches sent%d HTTP requests", hits.Load())
+	if hits.Load() != 4 {
+		t.Fatalf("three batches sent%d HTTP requests, want 4 (104 CPU quotes in two)", hits.Load())
 	}
 }
 
