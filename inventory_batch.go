@@ -1,8 +1,10 @@
 package runpod
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -48,11 +50,91 @@ type inventorySelection struct {
 	projections  []map[string]string
 }
 
-// ObserveInventory sends one GraphQL HTTP attempt for all requested roots.
-// It never retries an inventory request, including429; the shared client cooldown
-// still retains that refusal. The caller owns refresh cadence and next retry time.
-// A wholly empty request sends no HTTP.
+// Aliases per request, by root. An alias resolves once per row its root returns, so a request
+// costs about rows × aliases: ~45 gpuTypes, ~30 dataCenters, ~6 cpuFlavors. RunPod 500s one
+// request carrying a whole pass (~100 price aliases) near 6.5 s yet serves single-alias quotes;
+// about 400 resolutions per request stays far under that, in about 15 requests per pass.
+const (
+	censusChunk   = 8
+	gpuOfferChunk = 8
+	cpuOfferChunk = 64
+)
+
+// ObserveInventory reads every requested root in bounded requests, one non-retried attempt
+// each; the network volumes ride with the first census request. A failed request fails only
+// its own results, and after a rate limit or cancellation no further request is sent. It
+// fails as a whole only when every request failed. A wholly empty request sends no HTTP.
 func (c *Client) ObserveInventory(ctx context.Context, request InventoryRequest) (InventoryResult, error) {
+	if _, err := availabilitySelection(request.Availability); err != nil {
+		return InventoryResult{}, err
+	}
+	if _, err := gpuOfferSelection(request.GPUOffers); err != nil {
+		return InventoryResult{}, err
+	}
+	if _, err := cpuOfferSelection(request.CPUOffers); err != nil {
+		return InventoryResult{}, err
+	}
+	type part struct {
+		InventoryRequest
+		census, gpu, cpu int
+	}
+	var parts []part
+	for lo := 0; lo < len(request.Availability); lo += censusChunk {
+		parts = append(parts, part{InventoryRequest: InventoryRequest{Availability: request.Availability[lo:min(lo+censusChunk, len(request.Availability))],
+			NetworkVolumes: request.NetworkVolumes && lo == 0}, census: lo})
+	}
+	if request.NetworkVolumes && len(request.Availability) == 0 {
+		parts = append(parts, part{InventoryRequest: InventoryRequest{NetworkVolumes: true}})
+	}
+	for lo := 0; lo < len(request.GPUOffers); lo += gpuOfferChunk {
+		parts = append(parts, part{InventoryRequest: InventoryRequest{GPUOffers: request.GPUOffers[lo:min(lo+gpuOfferChunk, len(request.GPUOffers))]}, gpu: lo})
+	}
+	for lo := 0; lo < len(request.CPUOffers); lo += cpuOfferChunk {
+		parts = append(parts, part{InventoryRequest: InventoryRequest{CPUOffers: request.CPUOffers[lo:min(lo+cpuOfferChunk, len(request.CPUOffers))]}, cpu: lo})
+	}
+	result := InventoryResult{DataCenters: make([]DataCentersResult, len(request.Availability)), GPUOffers: make([]GPUOffersResult, len(request.GPUOffers)), CPUOffers: make([]CPUOfferResult, len(request.CPUOffers))}
+	var failed int
+	var stop, first error
+	for _, p := range parts {
+		got, err := InventoryResult{}, stop
+		if err == nil {
+			got, err = c.observeInventory(ctx, p.InventoryRequest)
+		}
+		if err != nil {
+			failed, first = failed+1, cmp.Or(first, err)
+			if errors.Is(err, ErrRateLimited) || ctx.Err() != nil {
+				stop = err
+			}
+			for i := range p.Availability {
+				result.DataCenters[p.census+i].Err = err
+			}
+			for i := range p.GPUOffers {
+				result.GPUOffers[p.gpu+i].Err = err
+			}
+			for i := range p.CPUOffers {
+				result.CPUOffers[p.cpu+i].Err = err
+			}
+			if p.NetworkVolumes {
+				result.NetworkVolumesErr = err
+			}
+			continue
+		}
+		copy(result.DataCenters[p.census:], got.DataCenters)
+		copy(result.GPUOffers[p.gpu:], got.GPUOffers)
+		copy(result.CPUOffers[p.cpu:], got.CPUOffers)
+		if p.NetworkVolumes {
+			result.NetworkVolumes, result.NetworkVolumesErr = got.NetworkVolumes, got.NetworkVolumesErr
+		}
+	}
+	if failed > 0 && failed == len(parts) {
+		return InventoryResult{}, first
+	}
+	return result, nil
+}
+
+// observeInventory sends one GraphQL HTTP attempt for all requested roots.
+// It never retries, including 429; the shared client cooldown still retains that refusal.
+func (c *Client) observeInventory(ctx context.Context, request InventoryRequest) (InventoryResult, error) {
 	result := InventoryResult{DataCenters: make([]DataCentersResult, len(request.Availability)), GPUOffers: make([]GPUOffersResult, len(request.GPUOffers)), CPUOffers: make([]CPUOfferResult, len(request.CPUOffers))}
 	var selections []inventorySelection
 	var err error

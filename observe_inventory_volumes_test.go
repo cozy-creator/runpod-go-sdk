@@ -47,12 +47,13 @@ func TestObserveInventoryVolumeFailuresRemainSeparateFromMarket(t *testing.T) {
 					t.Error(err)
 					return
 				}
+				_, asked := response.Data["myself"]
 				if tc.account == "" {
 					delete(response.Data, "myself")
-				} else {
+				} else if asked {
 					response.Data["myself"] = json.RawMessage(tc.account)
 				}
-				if tc.providerPath != nil {
+				if tc.providerPath != nil && asked {
 					response.Errors = []map[string]interface{}{{"message": "volume read unavailable", "path": tc.providerPath, "extensions": map[string]string{"code": "CACHE_READ"}}}
 				}
 				_ = json.NewEncoder(w).Encode(response)
@@ -83,7 +84,7 @@ func TestObserveInventoryVolumeFailuresRemainSeparateFromMarket(t *testing.T) {
 			if len(result.DataCenters) != 5 || result.DataCenters[0].Err != nil || len(result.GPUOffers) != 3 || result.GPUOffers[0].Err != nil || len(result.CPUOffers) != 104 || result.CPUOffers[0].Err != nil {
 				t.Fatal("volume failure affected market results")
 			}
-			if hits.Load() != 1 {
+			if hits.Load() != 4 {
 				t.Fatalf("market+volume snapshot sent%d HTTP requests", hits.Load())
 			}
 		})

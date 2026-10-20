@@ -116,13 +116,13 @@ func inventoryResponseFixture(t *testing.T, w http.ResponseWriter, r *http.Reque
 		data["myself"] = map[string]interface{}{"networkVolumes": []map[string]interface{}{{"id": "volume-one", "name": "cozy-cache-DC-1", "size": 500, "dataCenterId": "DC-1"}}}
 	}
 	body := map[string]interface{}{"data": data}
-	if failedRoot != "" {
+	if failedRoot != "" && strings.Contains(request.Query, failedRoot+"{") {
 		body["errors"] = []map[string]interface{}{{"message": "one alias unavailable", "path": []interface{}{failedRoot, 0, "q0"}, "extensions": map[string]string{"code": "ONE_ALIAS"}}}
 	}
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-func TestObserveInventoryUsesOneHTTPForFiveWidthsGPUPricesAnd104CPUOffers(t *testing.T) {
+func TestObserveInventoryReadsFiveWidthsGPUPricesAnd104CPUOffers(t *testing.T) {
 	var hits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1); inventoryResponseFixture(t, w, r, "") }))
 	defer server.Close()
@@ -160,8 +160,9 @@ func TestObserveInventoryUsesOneHTTPForFiveWidthsGPUPricesAnd104CPUOffers(t *tes
 	if result.NetworkVolumesErr != nil || len(result.NetworkVolumes) != 1 || result.NetworkVolumes[0].ID != "volume-one" || result.NetworkVolumes[0].Size != 500 || result.NetworkVolumes[0].DataCenterID != "DC-1" {
 		t.Fatalf("volume snapshot: %+v %v", result.NetworkVolumes, result.NetworkVolumesErr)
 	}
-	if hits.Load() != 1 {
-		t.Fatalf("combined inventory sent%d HTTP requests; hard limit is one", hits.Load())
+	// Census with volumes, three prices, and 104 CPU quotes in two.
+	if hits.Load() != 4 {
+		t.Fatalf("inventory sent %d HTTP requests, want 4", hits.Load())
 	}
 }
 
