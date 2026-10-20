@@ -2,6 +2,10 @@ package runpod
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -58,6 +62,14 @@ func (c *Client) rateLimited() *APIError {
 	return &err
 }
 
+// Cooldown is how long the provider asked this client to wait; zero when it may call now.
+func (c *Client) Cooldown() time.Duration {
+	if limited := c.rateLimited(); limited != nil {
+		return limited.RetryAfter
+	}
+	return 0
+}
+
 // Keep ordinary short same-call retries, but return a typed provider refusal
 // when waiting exceeds the ordinary backoff ceiling or the caller's budget.
 // The full server deadline remains retained for every later request either way.
@@ -81,4 +93,37 @@ func (c *Client) waitRateLimit(ctx context.Context) error {
 		case <-timer.C:
 		}
 	}
+}
+
+// quotaDelay is the longest exhausted RateLimit window, such as "hour";r=0;t=6000: r is the
+// requests left in the window and t the seconds until it resets.
+func quotaDelay(header http.Header) time.Duration {
+	var delay time.Duration
+	for _, value := range header.Values("RateLimit") {
+		for _, window := range strings.Split(value, ",") {
+			var remaining, reset string
+			for _, param := range strings.Split(window, ";")[1:] {
+				name, v, _ := strings.Cut(strings.TrimSpace(param), "=")
+				switch name {
+				case "r":
+					remaining = v
+				case "t":
+					reset = v
+				}
+			}
+			if t, ok := delaySeconds(reset); ok && remaining == "0" {
+				delay = max(delay, t)
+			}
+		}
+	}
+	return delay
+}
+
+// delaySeconds parses a count of seconds, saturating one too large rather than dropping it.
+func delaySeconds(v string) (time.Duration, bool) {
+	n, err := strconv.ParseUint(v, 10, 32)
+	if err != nil && !errors.Is(err, strconv.ErrRange) {
+		return 0, false
+	}
+	return time.Duration(n) * time.Second, true
 }
