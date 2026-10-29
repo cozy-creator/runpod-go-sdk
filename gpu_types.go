@@ -41,7 +41,7 @@ type GPUType struct {
 	Name         string                          `json:"name"`
 	Pool         *string                         `json:"pool"`
 	Manufacturer string                          `json:"manufacturer"`
-	Memory       int                             `json:"memory"`
+	Memory       int                             `json:"memory"` // Zero means unpopulated catalog metadata; not a VRAM capacity promise.
 	Secure       bool                            `json:"secure"`
 	Community    bool                            `json:"community"`
 	Price        GPUPrices                       `json:"price"`
@@ -51,8 +51,9 @@ type GPUType struct {
 	CUDAVersions []CUDAVersionAvailability       `json:"cudaVersions,omitempty"`
 }
 
-// UnmarshalJSON requires cloud support flags rather than treating an omitted
-// flag as evidence that the cloud cannot serve this GPU.
+// UnmarshalJSON requires cloud flags and memory metadata. The live v2 catalog
+// includes an unknown GPU sentinel with explicit memory=0; omission/null is
+// incomplete evidence, while zero is valid provider metadata.
 func (g *GPUType) UnmarshalJSON(raw []byte) error {
 	type native GPUType
 	var decoded native
@@ -62,12 +63,16 @@ func (g *GPUType) UnmarshalJSON(raw []byte) error {
 	var required struct {
 		Secure    *bool `json:"secure"`
 		Community *bool `json:"community"`
+		Memory    *int  `json:"memory"`
 	}
 	if err := json.Unmarshal(raw, &required); err != nil {
 		return err
 	}
 	if required.Secure == nil || required.Community == nil {
 		return fmt.Errorf("RunPod omitted GPU cloud support flags")
+	}
+	if required.Memory == nil {
+		return fmt.Errorf("RunPod omitted GPU memory metadata for %q", decoded.ID)
 	}
 	*g = GPUType(decoded)
 	return nil
@@ -179,8 +184,8 @@ func validateCatalogAvailability(status string) error {
 func validateGPUCatalog(items []GPUType) error {
 	seen := map[string]bool{}
 	for _, item := range items {
-		if item.ID == "" || item.Name == "" || item.Memory <= 0 {
-			return fmt.Errorf("RunPod returned incomplete GPU catalog row")
+		if item.ID == "" || item.Name == "" || item.Memory < 0 {
+			return fmt.Errorf("RunPod returned invalid GPU catalog row: id=%q name=%q memory=%d", item.ID, item.Name, item.Memory)
 		}
 		if seen[item.ID] {
 			return fmt.Errorf("RunPod returned duplicate GPU catalog id %q", item.ID)

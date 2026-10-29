@@ -53,3 +53,27 @@ func TestDataCentersRejectUnknownJoin(t *testing.T) {
 		t.Fatal("accepted unknown datacenter join")
 	}
 }
+
+func TestDataCenterProjectionUsesOnlyExplicitScopedRows(t *testing.T) {
+	// A real v2 observation reported global stock without optional location
+	// details. Preserve other located GPUs; global stock cannot name a DC.
+	unlocated := strings.Replace(catalogGPU, `"id":"gpu/a"`, `"id":"gpu/unlocated"`, 1)
+	unlocated = strings.Replace(unlocated, `,"dataCenters":[{"id":"dc1","name":"DC 1","availability":"LOW"}]`, "", 1)
+	c := newCatalogClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "datacenters") {
+			fmt.Fprint(w, catalogDCs)
+		} else {
+			fmt.Fprintf(w, `{"gpus":[%s,%s]}`, unlocated, catalogGPU)
+		}
+	})
+	secure := true
+	rows, err := c.ListDataCenters(t.Context(), &runpod.GPUAvailabilityFilter{SecureCloud: &secure, GPUCount: 1})
+	if err != nil || len(rows) != 1 || len(rows[0].GPUAvailability) != 1 || rows[0].GPUAvailability[0].GPUTypeID != "gpu/a" {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+	// An exact-location quote still cannot turn missing detail into stock or
+	// known absence merely because global availability is positive.
+	if _, err := c.ListGPUOffers(t.Context(), &runpod.GPUOfferFilter{IDs: []string{"gpu/unlocated"}, CloudType: "SECURE", DataCenterID: "dc1"}); err == nil {
+		t.Fatal("invented scoped stock from global-only evidence")
+	}
+}

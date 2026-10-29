@@ -21,6 +21,8 @@ type DataCenter struct {
 
 // GPUAvailabilityInDataCenter preserves the cloud whose scoped request supplied
 // its stock. A both-cloud census can contain two rows for the same GPU type.
+// Only explicit per-datacenter rows are projected; a missing GPU entry does not
+// prove that GPU unavailable there. Global stock cannot authorize a location.
 type GPUAvailabilityInDataCenter struct {
 	GPUTypeID   string
 	DisplayName string
@@ -90,9 +92,6 @@ func (c *Client) listDataCenters(ctx context.Context, f *GPUAvailabilityFilter, 
 			}
 			if !supported {
 				continue
-			}
-			if len(gpu.DataCenters) == 0 && gpu.Availability != "NONE" {
-				return nil, fmt.Errorf("RunPod omitted datacenters for available GPU %s", gpu.ID)
 			}
 			for _, availability := range gpu.DataCenters {
 				i, exists := byID[availability.ID]

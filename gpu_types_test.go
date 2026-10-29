@@ -86,3 +86,31 @@ func TestGPUCatalogFiltersValidateBeforeHTTP(t *testing.T) {
 		}
 	}
 }
+
+// Native v2 returns this sentinel alongside real SKUs. It must not poison the
+// complete catalog or become a rentable offer merely because maxCount is set.
+func TestGPUCatalogPreservesExplicitZeroMemorySentinel(t *testing.T) {
+	sentinel := `{"id":"unknown","name":"unknown","pool":null,"manufacturer":"NVIDIA","memory":0,"secure":false,"community":false,"price":{"secure":0,"community":0},"maxCount":{"secure":8,"community":8},"availability":"NONE"}`
+	c := newCatalogClient(t, func(w http.ResponseWriter, r *http.Request) { fmt.Fprintf(w, `{"gpus":[%s,%s]}`, sentinel, catalogGPU) })
+	rows, err := c.ListGPUTypes(t.Context(), nil)
+	if err != nil || len(rows) != 2 || rows[0].ID != "unknown" || rows[0].Memory != 0 {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+	offers, err := c.ListGPUOffers(t.Context(), &runpod.GPUOfferFilter{CloudType: "SECURE", InStockOnly: true})
+	if err != nil || len(offers) != 1 || offers[0].GPUTypeID != "gpu/a" {
+		t.Fatalf("offers=%+v err=%v", offers, err)
+	}
+}
+
+func TestGPUCatalogRefusesMissingNullAndNegativeMemory(t *testing.T) {
+	for _, row := range []string{
+		strings.Replace(catalogGPU, `"memory":24,`, "", 1),
+		strings.Replace(catalogGPU, `"memory":24`, `"memory":null`, 1),
+		strings.Replace(catalogGPU, `"memory":24`, `"memory":-1`, 1),
+	} {
+		c := newCatalogClient(t, func(w http.ResponseWriter, r *http.Request) { writeGPUs(w, row) })
+		if _, err := c.ListGPUTypes(t.Context(), nil); err == nil {
+			t.Fatal("accepted missing, null, or negative memory metadata")
+		}
+	}
+}

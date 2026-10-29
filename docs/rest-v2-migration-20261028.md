@@ -117,3 +117,11 @@ uses sequential REST reads, caches identical URLs within one pass, preserves
 individual failures, and stops issuing requests after a rate limit or cancellation.
 These are implementation decisions; full-check, consumer adoption and deployment
 receipts must be recorded separately.
+
+## Runtime observations, 2026-10-29
+
+Normal SDK reads of the real v2 service exposed a catalog sentinel with `id` and `name` equal to `unknown`, explicit `memory: 0`, neither cloud supported, and `availability: NONE`. The v2 schema allows integer memory without a positive minimum. SDK0.5.1 preserves explicit zero metadata while still rejecting omitted, null or negative memory; stock and price checks remain independent.
+
+An observation also contained global GPU availability without the optional per-datacenter detail, followed by a later observation with explicit locations. The datacenter census projects only explicit, cloud-scoped location rows and does not infer availability or absence for unlocated GPU types. A request for an exact datacenter quote still refuses positive global stock without location detail. This preserves useful independent rows without inventing placement evidence.
+
+These were read-only SDK requests using the configured production credential in process memory. Credential values and full resource responses were not logged or persisted; no synthetic paid rental was created.
