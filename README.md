@@ -4,6 +4,24 @@ Go client for RunPod's **REST v2 control plane** and separate **Serverless infer
 
 REST v1 and GraphQL support have been removed. This is a breaking SDK migration: requests and responses use native v2 fields. Old prepared purchase bodies are rejected before HTTP. See the [migration notes](docs/rest-v2-migration-20261028.md) for the official contract and unsupported legacy capabilities.
 
+## Why use this SDK instead of the official one?
+
+For general REST v2 access, the [official Runpod Go SDK](https://github.com/runpod/go-sdk) is a valid starting point and covers more management API areas. This library packages the purchase and evidence contracts that TensorHub currently relies on:
+
+- **Durable purchases:** prepare and inspect a validated create body, persist its exact bytes before spending, then execute those bytes unchanged. Typed capacity failures allow fallback; ambiguous outcomes require readback rather than another purchase.
+- **Exact money and qualified billing evidence:** decode rates directly to integer USD micros, preserve bounded raw billing responses, and validate the pod identity, requested/resolved window, record counts and amount totals before using a bill. Missing facts do not become zero-cost evidence.
+- **Quota and observation handling:** retain the longest exhausted quota window across calls, including after cancellation; follow complete cursor walks and refuse incomplete or stalled snapshots before treating a resource as absent. Inventory helpers retain cloud/count/location scope and per-result failures.
+
+These are important to our consumer, but they are not capabilities that only our SDK could provide. The official client already avoids retrying ambiguous POST/PATCH transport and server failures, accepts raw request bodies, and retains raw response bytes. Its generated money fields use floating-point types, paginated list operations return one page, and retry state is per request. A consumer can build the additional contracts above around it. Replacing this library would mean preserving and qualifying those contracts, rather than just changing imports.
+
+Serverless job helpers in the same client are a convenience. The official REST v2 client keeps resource management separate from its older `pkg/sdk` Serverless invocation module. This library does not claim complete Runpod API coverage or official status.
+
+### Historical scope
+
+The official repository dates to 2023, when its `pkg/sdk` client handled Serverless jobs. Its generated REST v2 resource client was [added on October 13, 2026](https://github.com/runpod/go-sdk/commit/d7cd5e28594e190ada4564133bb7d725faa1d617). This project [already implemented Pod management in June 2025](https://github.com/cozy-creator/runpod-go-sdk/commit/31db935). The repository’s age therefore does not mean today’s management client was available when this project began; the current official client does support Pod management.
+
+Comparison checked against official **v2.1.0** on October 29, 2026: [retry transport](https://github.com/runpod/go-sdk/blob/d261aaf1f3cb4cd73c4c73fef1631e6d5a222958/transport/retry.go), [generated types](https://github.com/runpod/go-sdk/blob/d261aaf1f3cb4cd73c4c73fef1631e6d5a222958/lib/types/types.gen.go), [raw Pod requests](https://github.com/runpod/go-sdk/blob/d261aaf1f3cb4cd73c4c73fef1631e6d5a222958/lib/pods/pods.gen.go), and [billing responses](https://github.com/runpod/go-sdk/blob/d261aaf1f3cb4cd73c4c73fef1631e6d5a222958/lib/billing/billing.gen.go).
+
 ## Install
 
 ```bash
