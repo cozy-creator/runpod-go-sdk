@@ -30,7 +30,7 @@ The official client already protects POST/PATCH against ambiguous transport/serv
 
 This is **not a drop-in import replacement**. Archiving preserves this repository’s history, tags, and [v0.5.1 release](https://github.com/cozy-creator/runpod-go-sdk/releases/tag/v0.5.1) for pinned consumers.
 
-TensorHub currently pins v0.5.1. Replacing that dependency with the official client and a qualified provider adapter is a separate migration; archiving this repository does not perform it.
+TensorHub has migrated to the official `github.com/runpod/go-sdk/v2` client. Its purchase and evidence contracts now live in `internal/provider/runpodapi`; the archived SDK is no longer a TensorHub dependency. The adapter and deployed provider observations were qualified before this notice was updated.
 
 The last maintained SDK used REST v2 only for management, with separate Serverless inference support. Historical usage documentation is retained in [the v0.5.1 reference](docs/archived-sdk-v0.5.1.md); the [v2 migration notes](docs/rest-v2-migration-20261028.md) record the contract and live-read findings.
 
