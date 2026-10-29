@@ -2,7 +2,6 @@ package runpod
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
@@ -37,68 +36,18 @@ type SSHTarget struct {
 // for runpod's image-runtime to install the key into authorized_keys. Without
 // that, the pod will be reachable on the discovered port but auth will fail.
 func (c *Client) DiscoverSSHTarget(ctx context.Context, podID string) (*SSHTarget, error) {
-	if err := c.validateRequired("podID", podID); err != nil {
+	pod, err := c.GetPod(ctx, podID)
+	if err != nil {
 		return nil, err
 	}
-
-	ports, runtimePresent, err := c.getPodSSHRuntimePorts(ctx, podID)
-	if err != nil {
-		return nil, fmt.Errorf("ssh-discover %s: %w", podID, err)
+	if pod.Status != "RUNNING" || pod.SSH == nil || pod.SSH.Direct == nil {
+		return nil, fmt.Errorf("ssh-discover %s: no running direct SSH endpoint", podID)
 	}
-	if !runtimePresent {
-		return nil, fmt.Errorf("ssh-discover %s: runtime not yet up (still pulling image or starting?)", podID)
+	endpoint := pod.SSH.Direct
+	if endpoint.Host == "" || endpoint.Port < 1 || endpoint.Port > 65535 || endpoint.Username == "" {
+		return nil, fmt.Errorf("ssh-discover %s: invalid direct SSH endpoint", podID)
 	}
-
-	for _, p := range ports {
-		if p.PrivatePort != 22 {
-			continue
-		}
-		if !strings.EqualFold(strings.TrimSpace(p.Type), "tcp") {
-			continue
-		}
-		host := strings.TrimSpace(p.IP)
-		port := p.PublicPort
-		if host == "" || port == 0 {
-			continue
-		}
-		return &SSHTarget{Host: host, Port: port, User: "root"}, nil
-	}
-
-	// Surface the available mappings so callers can spot a misconfigured pod.
-	available, _ := json.Marshal(ports)
-	return nil, fmt.Errorf("ssh-discover %s: no privatePort=22/tcp mapping (was pod created with PUBLIC_KEY env?). available ports=%s", podID, string(available))
-}
-
-func (c *Client) getPodSSHRuntimePorts(ctx context.Context, podID string) ([]PodRuntimePort, bool, error) {
-	const query = `query($input: PodFilter!) {
-  pod(input: $input) {
-    id
-    runtime { ports { ip isIpPublic privatePort publicPort type } }
-  }
-}`
-	var response struct {
-		Pod *struct {
-			ID      string `json:"id"`
-			Runtime *struct {
-				Ports []PodRuntimePort `json:"ports"`
-			} `json:"runtime"`
-		} `json:"pod"`
-	}
-	if err := c.GraphQL(ctx, query, map[string]interface{}{
-		"input": map[string]interface{}{"podId": podID},
-	}, &response); err != nil {
-		return nil, false, err
-	}
-	if response.Pod == nil {
-		return nil, false, NewAPIErrorWithDetails(404, "pod not found", podID)
-	}
-	if strings.TrimSpace(response.Pod.ID) != podID {
-		return nil, false, fmt.Errorf("provider returned pod id %q for requested id %q", response.Pod.ID, podID)
-	}
-	if response.Pod.Runtime == nil {
-		return nil, false, nil
-	}
-	return append([]PodRuntimePort(nil), response.Pod.Runtime.Ports...), true, nil
+	return &SSHTarget{Host: endpoint.Host, Port: endpoint.Port, User: endpoint.Username}, nil
 }
 
 // StreamPodCommandOptions configures how StreamPodCommand invokes ssh.

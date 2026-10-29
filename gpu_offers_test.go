@@ -2,194 +2,75 @@ package runpod_test
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
 	runpod "github.com/cozy-creator/runpod-go-sdk"
 )
 
-func TestListGPUOffers(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Query     string                 `json:"query"`
-			Variables map[string]interface{} `json:"variables"`
+func TestGPUOffersScopeBothCloudsAndMultiplyPerGPURates(t *testing.T) {
+	calls := 0
+	c := newCatalogClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Query().Get("count") != "2" {
+			t.Error("missing count filter")
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode: %v", err)
+		if calls == 1 && r.URL.Query().Get("cloud") != "SECURE" {
+			t.Error("first cloud")
 		}
-		if !strings.Contains(req.Query, "secure: lowestPrice") || !strings.Contains(req.Query, "community: lowestPrice") {
-			t.Fatalf("offers query must alias lowestPrice per cloud: %s", req.Query)
+		if calls == 2 && r.URL.Query().Get("cloud") != "COMMUNITY" {
+			t.Error("second cloud")
 		}
-		if req.Variables["gpuCount"] != float64(2) {
-			t.Fatalf("gpuCount variable not passed: %v", req.Variables)
-		}
-		if req.Variables["dataCenterId"] != "US-KS-2" || req.Variables["minMemoryInGb"] != float64(64) || req.Variables["minVcpuCount"] != float64(8) {
-			t.Fatalf("lowestPrice variables = %#v", req.Variables)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"gpuTypes":[
-			{"id":"gpu-both","displayName":"Both","memoryInGb":24,"secureCloud":true,"communityCloud":true,
-			 "secure":{"minimumBidPrice":0.2,"uninterruptablePrice":0.6,"stockStatus":"High"},
-			 "community":{"minimumBidPrice":"0.100001","uninterruptablePrice":"0.4","stockStatus":"Low"}},
-			{"id":"gpu-secure-only","displayName":"SecureOnly","memoryInGb":80,"secureCloud":true,"communityCloud":false,
-			 "secure":{"minimumBidPrice":1.0,"uninterruptablePrice":2.0,"stockStatus":"High"},
-			 "community":null},
-			{"id":"gpu-out","displayName":"Out","memoryInGb":16,"secureCloud":true,"communityCloud":false,
-			 "secure":{"minimumBidPrice":0.05,"uninterruptablePrice":0.2,"stockStatus":"Unavailable"},
-			 "community":null}
-		]}}`))
-	}))
-	defer server.Close()
-
-	client := mustClient(t, "test_key", runpod.WithGraphQLBaseURL(server.URL))
-	offers, err := client.ListGPUOffers(context.Background(), &runpod.GPUOfferFilter{
-		GPUCount: 2, InStockOnly: true, DataCenterID: "US-KS-2", MinMemoryInGB: 64, MinVCPUCount: 8,
+		writeGPUs(w, catalogGPU)
 	})
-	if err != nil {
-		t.Fatalf("ListGPUOffers: %v", err)
+	offers, err := c.ListGPUOffers(context.Background(), &runpod.GPUOfferFilter{GPUCount: 2, DataCenterID: "dc1"})
+	if err != nil || len(offers) != 2 || calls != 2 {
+		t.Fatalf("offers=%+v calls=%d err=%v", offers, calls, err)
 	}
-
-	// gpu-out excluded (unavailable); gpu-both yields two offers; sorted by
-	// on-demand price ascending.
-	if len(offers) != 3 {
-		t.Fatalf("expected 3 offers, got %d: %+v", len(offers), offers)
-	}
-	if offers[0].GPUTypeID != "gpu-both" || offers[0].CloudType != "COMMUNITY" || offers[0].OnDemandPriceUSDMicrosPerHour != 400_000 {
-		t.Errorf("cheapest offer wrong: %+v", offers[0])
-	}
-	if offers[1].CloudType != "SECURE" || offers[1].GPUTypeID != "gpu-both" {
-		t.Errorf("second offer wrong: %+v", offers[1])
-	}
-	if offers[2].GPUTypeID != "gpu-secure-only" || offers[2].MinimumBidPriceUSDMicrosPerHour == nil ||
-		*offers[2].MinimumBidPriceUSDMicrosPerHour != 1_000_000 {
-		t.Errorf("third offer wrong: %+v", offers[2])
-	}
-	if floor, ok := offers[0].MinimumBidPerGPUUSDMicrosPerHour(); !ok || floor != 50_001 {
-		t.Errorf("ceil-safe per-GPU floor = %d, %t; want 50001, true", floor, ok)
-	}
-	for _, offer := range offers {
-		if offer.GPUCount != 2 {
-			t.Fatalf("offer GPUCount = %d, want 2: %+v", offer.GPUCount, offer)
-		}
+	if offers[0].CloudType != "COMMUNITY" || offers[0].OnDemandPriceUSDMicrosPerHour != 460000 || offers[1].OnDemandPriceUSDMicrosPerHour != 620000 || offers[0].StockStatus != "LOW" || offers[0].PriceSource != runpod.CatalogListPrice {
+		t.Fatalf("offers=%+v", offers)
 	}
 }
-
-func TestListGPUOffersRejectsInvalidShape(t *testing.T) {
-	client := mustClient(t, "test_key")
-	_, err := client.ListGPUOffers(t.Context(), &runpod.GPUOfferFilter{MinDisk: -1})
-	var validation *runpod.ValidationError
-	if !errors.As(err, &validation) || validation.Field != "minDisk" {
-		t.Fatalf("error = %v", err)
+func TestGPUOffersMissingPriceIsUnavailable(t *testing.T) {
+	row := strings.Replace(catalogGPU, `"secure":0.31`, `"secure":null`, 1)
+	c := newCatalogClient(t, func(w http.ResponseWriter, r *http.Request) { writeGPUs(w, row) })
+	offers, err := c.ListGPUOffers(context.Background(), nil)
+	if err != nil || len(offers) != 1 || offers[0].CloudType != "COMMUNITY" {
+		t.Fatalf("offers=%+v err=%v", offers, err)
 	}
 }
-
-func TestListGPUOffersRefusesInexactPrices(t *testing.T) {
-	for name, price := range map[string]string{
-		"sub-micro": `{"minimumBidPrice":0.0000001,"uninterruptablePrice":0.4,"stockStatus":"High"}`,
-		"overflow":  `{"minimumBidPrice":0.1,"uninterruptablePrice":"9223372036854.775808","stockStatus":"High"}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				fmt.Fprintf(w, `{"data":{"gpuTypes":[{"id":"gpu","secureCloud":true,"secure":%s}]}}`, price)
-			}))
-			defer server.Close()
-			client := mustClient(t, "test_key", runpod.WithGraphQLBaseURL(server.URL))
-			if _, err := client.ListGPUOffers(t.Context(), nil); err == nil {
-				t.Fatal("purchase-authority price must refuse")
+func TestGPUOffersRefuseInexactOrOverflowingMoney(t *testing.T) {
+	for _, price := range []string{"0.0000001", "-0.1", "9223372036854.775808", "9223372036854.775807"} {
+		t.Run(price, func(t *testing.T) {
+			c := newCatalogClient(t, func(w http.ResponseWriter, r *http.Request) {
+				writeGPUs(w, strings.Replace(catalogGPU, "0.31", price, 1))
+			})
+			if _, err := c.ListGPUOffers(context.Background(), &runpod.GPUOfferFilter{CloudType: "SECURE", GPUCount: 2}); err == nil {
+				t.Fatal("accepted inexact/overflow price")
 			}
 		})
 	}
 }
-
-func TestListGPUOffersSkipsOnlyUnpricedCloudArm(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"data":{"gpuTypes":[
-			{"id":"unpriced","secureCloud":true,"secure":{"minimumBidPrice":0.1,"stockStatus":"High"}},
-			{"id":"priced","secureCloud":true,"secure":{"uninterruptablePrice":"0.4","stockStatus":"High"}}
-		]}}`)
-	}))
-	defer server.Close()
-	client := mustClient(t, "test_key", runpod.WithGraphQLBaseURL(server.URL))
-	offers, err := client.ListGPUOffers(t.Context(), nil)
-	if err != nil || len(offers) != 1 || offers[0].GPUTypeID != "priced" {
-		t.Fatalf("offers = %+v, %v; want only the priced arm", offers, err)
+func TestGPUOfferStockNeverUsesMaxCount(t *testing.T) {
+	row := strings.Replace(catalogGPU, `"availability":"HIGH"`, `"availability":"NONE"`, 1)
+	c := newCatalogClient(t, func(w http.ResponseWriter, r *http.Request) { writeGPUs(w, row) })
+	offers, err := c.ListGPUOffers(context.Background(), &runpod.GPUOfferFilter{CloudType: "SECURE", InStockOnly: true})
+	if err != nil || len(offers) != 0 {
+		t.Fatalf("offers=%+v err=%v", offers, err)
 	}
 }
-
-func TestListGPUOffersAllowsMissingSpotFloor(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"data":{"gpuTypes":[{"id":"gpu","secureCloud":true,"secure":{"uninterruptablePrice":"0.4","stockStatus":"High"}}]}}`)
-	}))
-	defer server.Close()
-	client := mustClient(t, "test_key", runpod.WithGraphQLBaseURL(server.URL))
-	offers, err := client.ListGPUOffers(t.Context(), nil)
-	if err != nil || len(offers) != 1 || offers[0].MinimumBidPriceUSDMicrosPerHour != nil {
-		t.Fatalf("offers = %+v, %v; want one on-demand offer with no spot floor", offers, err)
+func TestGPUOffersRefuseUnknownDatacenterAvailability(t *testing.T) {
+	row := strings.Replace(catalogGPU, `,"dataCenters":[{"id":"dc1","name":"DC 1","availability":"LOW"}]`, "", 1)
+	c := newCatalogClient(t, func(w http.ResponseWriter, r *http.Request) { writeGPUs(w, row) })
+	if _, err := c.ListGPUOffers(context.Background(), &runpod.GPUOfferFilter{CloudType: "SECURE", DataCenterID: "dc1"}); err == nil {
+		t.Fatal("missing datacenters became NONE")
 	}
 }
-
-func TestBidPerGPUValidation(t *testing.T) {
-	client := mustClient(t, "test_key")
-	ctx := context.Background()
-
-	req := &runpod.CreatePodRequest{
-		Name:                      "n",
-		ImageName:                 "img",
-		GPUTypeIDs:                []string{"A"},
-		GPUCount:                  1,
-		ContainerDiskInGB:         10,
-		BidPerGPUUSDMicrosPerHour: 250_000,
-	}
-	if _, err := client.CreatePod(ctx, req); err == nil {
-		t.Fatal("BidPerGPUUSDMicrosPerHour without Interruptible must fail validation")
-	}
-
-	req.BidPerGPUUSDMicrosPerHour = -1
-	req.Interruptible = true
-	if _, err := client.CreatePod(ctx, req); err == nil {
-		t.Fatal("negative BidPerGPUUSDMicrosPerHour must fail validation")
-	}
-}
-
-func TestCreateSpotPodSendsBid(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			Interruptible bool            `json:"interruptible"`
-			BidPerGPU     json.RawMessage `json:"bidPerGpu"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		if !body.Interruptible {
-			t.Fatalf("interruptible not set: %v", body)
-		}
-		if string(body.BidPerGPU) != "0.25" {
-			t.Fatalf("bidPerGpu = %s, want exact 0.25 JSON decimal", body.BidPerGPU)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"pod-spot","interruptible":true}`))
-	}))
-	defer server.Close()
-
-	client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL))
-	pod, err := client.CreateSpotPod(context.Background(), &runpod.CreatePodRequest{
-		Name:                      "n",
-		ImageName:                 "img",
-		GPUTypeIDs:                []string{"A"},
-		GPUCount:                  1,
-		ContainerDiskInGB:         10,
-		BidPerGPUUSDMicrosPerHour: 250_000,
-	})
-	if err != nil {
-		t.Fatalf("CreateSpotPod: %v", err)
-	}
-	if pod.ID != "pod-spot" {
-		t.Fatalf("unexpected pod %+v", pod)
+func TestGPUOffersMissingSelectedDatacenterIsKnownUnavailable(t *testing.T) {
+	c := newCatalogClient(t, func(w http.ResponseWriter, r *http.Request) { writeGPUs(w, catalogGPU) })
+	offers, err := c.ListGPUOffers(context.Background(), &runpod.GPUOfferFilter{CloudType: "SECURE", DataCenterID: "other", InStockOnly: true})
+	if err != nil || len(offers) != 0 {
+		t.Fatalf("offers=%+v err=%v", offers, err)
 	}
 }

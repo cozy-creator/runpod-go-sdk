@@ -13,21 +13,16 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
 	// DefaultBaseURL is the default RunPod REST API base URL
-	DefaultBaseURL = "https://rest.runpod.io/v1"
-
-	// DefaultRESTV2BaseURL is the REST v2 base used by pod log streams.
-	DefaultRESTV2BaseURL = "https://api.runpod.io/v2"
+	DefaultBaseURL = "https://api.runpod.io/v2"
 
 	// DefaultServerlessBaseURL is the base URL for serverless operations
 	DefaultServerlessBaseURL = "https://api.runpod.ai"
-
-	// DefaultGraphQLBaseURL is the default RunPod GraphQL API URL
-	DefaultGraphQLBaseURL = "https://api.runpod.io/graphql"
 
 	// DefaultTimeout is the default HTTP client timeout
 	DefaultTimeout = 30 * time.Second
@@ -52,9 +47,7 @@ const (
 type Client struct {
 	apiKey            string
 	baseURL           string
-	restV2BaseURL     string
 	serverlessBaseURL string
-	graphqlBaseURL    string
 
 	httpClient *http.Client
 	userAgent  string
@@ -63,8 +56,10 @@ type Client struct {
 	maxRetryAttempts int
 	retryDelay       time.Duration
 
-	logger   Logger
-	cooldown clientCooldown
+	logger             Logger
+	cooldown           clientCooldown
+	inferenceMu        sync.Mutex
+	inferenceCooldowns map[string]*clientCooldown
 }
 
 // Logger interface for custom logging
@@ -89,22 +84,10 @@ func WithBaseURL(baseURL string) ClientOption {
 	}
 }
 
-// WithRESTV2BaseURL sets the REST v2 base used by pod log streams.
-func WithRESTV2BaseURL(baseURL string) ClientOption {
-	return func(c *Client) { c.restV2BaseURL = baseURL }
-}
-
 // WithServerlessBaseURL sets a custom base URL for serverless operations
 func WithServerlessBaseURL(baseURL string) ClientOption {
 	return func(c *Client) {
 		c.serverlessBaseURL = baseURL
-	}
-}
-
-// WithGraphQLBaseURL sets a custom base URL for GraphQL operations.
-func WithGraphQLBaseURL(baseURL string) ClientOption {
-	return func(c *Client) {
-		c.graphqlBaseURL = baseURL
 	}
 }
 
@@ -166,9 +149,7 @@ func NewClient(apiKey string, opts ...ClientOption) (*Client, error) {
 	c := &Client{
 		apiKey:            apiKey,
 		baseURL:           DefaultBaseURL,
-		restV2BaseURL:     DefaultRESTV2BaseURL,
 		serverlessBaseURL: DefaultServerlessBaseURL,
-		graphqlBaseURL:    DefaultGraphQLBaseURL,
 		httpClient: &http.Client{
 			Timeout: DefaultTimeout,
 		},
@@ -223,6 +204,7 @@ func (c *Client) makeRequestBytesWithHeaders(ctx context.Context, method, endpoi
 }
 
 func (c *Client) makeRequestBytesWithRetryLimit(ctx context.Context, method, endpoint string, jsonBody []byte, headers http.Header, maxRetries int) (*http.Response, error) {
+	gate := c.requestCooldown(endpoint)
 
 	var lastErr error
 	var retryAfter time.Duration
@@ -238,7 +220,7 @@ func (c *Client) makeRequestBytesWithRetryLimit(ctx context.Context, method, end
 			retryAfter = 0
 		}
 		waited = false
-		if limited := c.rateLimited(); limited != nil {
+		if limited := gate.rateLimited(); limited != nil {
 			return nil, limited
 		}
 
@@ -260,7 +242,7 @@ func (c *Client) makeRequestBytesWithRetryLimit(ctx context.Context, method, end
 			// Suppress later calls as soon as headers arrive, even if this
 			// response body stalls or the caller cancels while reading it.
 			headerLimit := c.parseErrorResponse(resp.StatusCode, resp.Header, nil).(*APIError)
-			until := c.retainRateLimit(headerLimit, c.backoff(attempt+1, headerLimit.RetryAfter))
+			until := gate.retainRateLimit(headerLimit, c.backoff(attempt+1, headerLimit.RetryAfter))
 			body, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			limited := c.parseErrorResponse(resp.StatusCode, resp.Header, body).(*APIError)
@@ -268,11 +250,11 @@ func (c *Client) makeRequestBytesWithRetryLimit(ctx context.Context, method, end
 			if readErr != nil {
 				limited.Details = fmt.Sprintf("read rate-limit response: %v", readErr)
 			}
-			c.enrichRateLimit(until, limited)
+			gate.enrichRateLimit(until, limited)
 			if attempt == maxRetries {
 				return nil, limited
 			}
-			if err := c.waitRateLimit(ctx); err != nil {
+			if err := gate.waitRateLimit(ctx); err != nil {
 				return nil, limited
 			}
 			waited = true
@@ -281,7 +263,7 @@ func (c *Client) makeRequestBytesWithRetryLimit(ctx context.Context, method, end
 		// An answer that spends a quota window's last request is returned unchanged; every
 		// later call waits for the window to reset.
 		if delay := quotaDelay(resp.Header); delay > 0 {
-			c.retainRateLimit(&APIError{StatusCode: http.StatusTooManyRequests,
+			gate.retainRateLimit(&APIError{StatusCode: http.StatusTooManyRequests,
 				Message: fmt.Sprintf("RunPod quota exhausted (declared on HTTP %d)", resp.StatusCode)}, delay)
 			return resp, nil
 		}
@@ -385,13 +367,13 @@ func (c *Client) doRequestWithHeaders(ctx context.Context, method, endpoint stri
 }
 
 // buildURL constructs the full URL for a given endpoint. Absolute URLs pass
-// through unchanged (the GraphQL and serverless method groups build absolute
-// URLs against their own bases); anything else is a REST API path.
+// through unchanged (Serverless inference uses a separate base); anything
+// else is a REST v2 control-plane path.
 func (c *Client) buildURL(endpoint string) string {
 	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
 		return endpoint
 	}
-	return c.baseURL + endpoint
+	return strings.TrimRight(c.baseURL, "/") + endpoint
 }
 
 // serverlessURL builds an absolute URL against the serverless base.
@@ -587,8 +569,11 @@ func (c *Client) buildListURL(endpoint string, opts *ListOptions) string {
 		params["limit"] = strconv.Itoa(opts.Limit)
 	}
 
-	if opts.Offset > 0 {
-		params["offset"] = strconv.Itoa(opts.Offset)
+	if opts.Cursor != "" {
+		params["cursor"] = opts.Cursor
+	}
+	if opts.IncludeClusterPods {
+		params["includeClusterPods"] = "true"
 	}
 
 	return c.buildURLWithParams(endpoint, params)

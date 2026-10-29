@@ -27,13 +27,13 @@ func quotaClient(t *testing.T, hits *atomic.Int32, status int, header http.Heade
 	return client, &now
 }
 
-// Every REST, GraphQL and mutation call is refused, without HTTP, for what remains of the
+// Every REST reads and mutation call is refused, without HTTP, for what remains of the
 // longest exhausted window.
 func assertQuotaRefuses(t *testing.T, client *Client, hits *atomic.Int32, remaining time.Duration) {
 	t.Helper()
 	for _, call := range []func() error{
 		func() error { return client.Get(t.Context(), "/billing/pods", nil) },
-		func() error { return client.GraphQL(t.Context(), "query { myself { id } }", nil, nil) },
+		func() error { return client.Get(t.Context(), "/catalog/gpus", nil) },
 		func() error { return client.Post(t.Context(), "/pods", nil, nil) },
 		func() error { return client.Delete(t.Context(), "/pods/id") },
 	} {

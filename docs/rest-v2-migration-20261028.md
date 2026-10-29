@@ -99,3 +99,21 @@ TensorHub must adopt the new SDK and adjust any removed capability before this
 change is considered deployed. Durable prepared create records from legacy
 transports require explicit reconciliation; they must not be replayed as a
 changed purchase request under v2.
+
+## SDK migration choices
+
+The migration uses one management base (`WithBaseURL`) and native v2 Pod create
+and response models. GraphQL transport/options, legacy REST paths, spot/bid
+operations, balance reads, unsupported inventory resource filters, and dual-source
+readback/coherence models are removed. Serverless inference retains its separate
+base because it serves jobs rather than infrastructure management.
+
+Normalized GPU/CPU offers retain exact aggregate hourly rates, with
+`PriceSource=catalog_list_price`; their rates are derived from the cloud's
+per-GPU or per-vCPU catalog rate. A selected datacenter scopes availability, not
+the price. Datacenter storage support derives from `networkVolumeTypes`, and
+normalized availability rows preserve the cloud that supplied them. Inventory
+uses sequential REST reads, caches identical URLs within one pass, preserves
+individual failures, and stops issuing requests after a rate limit or cancellation.
+These are implementation decisions; full-check, consumer adoption and deployment
+receipts must be recorded separately.

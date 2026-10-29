@@ -1,49 +1,50 @@
 package runpod
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"math"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 )
 
-const (
-	podBillingGrouping   = "podId"
-	podBillingBucketSize = "hour"
-	// podBillingBucketLayout is RunPod's zoneless bucket time, documented and
-	// observed as UTC ("2026-09-28 09:00:00"). No other zoneless form is accepted.
-	podBillingBucketLayout = "2006-01-02 15:04:05"
+const maxPodBillingResponseBytes = 16 << 20
 
-	// maxPodBillingResponseBytes bounds the exact provider evidence retained
-	// for one hourly-history query.
-	maxPodBillingResponseBytes = 16 << 20
-)
-
-// PodBillingRecord is one provider-reported hourly billing aggregate. Money
-// is signed integer USD micros, rounded from the exact provider decimal to the
-// nearest micro without passing through float64.
+// PodBillingRecord is one REST v2 billing bucket. Bucket boundaries are not
+// evidence of the pod's billed runtime; v2 does not expose that duration.
 type PodBillingRecord struct {
-	PodID           string    `json:"podId"`
-	BucketStart     time.Time `json:"time"`
-	AmountUSDMicros int64     `json:"amountUsdMicros"`
-	TimeBilledMs    int64     `json:"timeBilledMs"`
+	PodID               string
+	BucketStart         time.Time
+	BucketEnd           time.Time
+	AmountUSDMicros     int64
+	GPUAmountUSDMicros  int64
+	CPUAmountUSDMicros  int64
+	DiskAmountUSDMicros int64
 }
 
-// PodBillingHistory is the complete evidence returned by one billing read.
-// NormalizedQuery is the URL-encoded query string sent on the wire. RawResponse
-// preserves the response body byte-for-byte; callers should treat both byte
-// slices and Records as immutable.
+type PodBillingQuery struct {
+	StartTime  time.Time `json:"startTime"`
+	EndTime    time.Time `json:"endTime"`
+	BucketSize string    `json:"bucketSize"`
+	PodID      string    `json:"podId"`
+}
+
+// PodBillingHistory preserves both the requested query and the provider's
+// resolved query (which snaps to bucket edges), plus the complete raw response.
+// TotalAmountUSDMicros is the checked sum of individually rounded records;
+// MetadataTotalAmountUSDMicros retains the independently rounded provider total.
 type PodBillingHistory struct {
-	NormalizedQuery      string
-	RawResponse          []byte
-	Records              []PodBillingRecord
-	TotalAmountUSDMicros int64
+	NormalizedQuery              string
+	RawResponse                  []byte
+	Query                        PodBillingQuery
+	Records                      []PodBillingRecord
+	TotalAmountUSDMicros         int64
+	MetadataTotalAmountUSDMicros int64
 }
 
 // PodBillingEvidenceErrorKind is a stable provider-wire refusal class. Callers
@@ -86,170 +87,165 @@ func (e *PodBillingEvidenceError) Unwrap() error {
 	return e.cause
 }
 
-// GetPodBillingHistory retrieves RunPod's hourly billing aggregates for one
-// exact pod and UTC interval. The request always forces grouping=podId and
-// bucketSize=hour. An empty JSON array is valid zero-cost evidence; malformed,
-// incomplete, foreign-pod, or overflowing evidence is refused.
+// GetPodBillingHistory requests hourly v2 buckets for one exact pod. Every
+// signed decimal rounds directly to USD micros, never through float64.
 func (c *Client) GetPodBillingHistory(ctx context.Context, podID string, startTime, endTime time.Time) (*PodBillingHistory, error) {
 	if podID == "" || podID != strings.TrimSpace(podID) {
 		return nil, NewValidationError("podID", "must be a non-empty exact pod id")
 	}
-	if startTime.IsZero() {
-		return nil, NewValidationError("startTime", "cannot be zero")
+	if startTime.IsZero() || endTime.IsZero() || !endTime.After(startTime) {
+		return nil, NewValidationError("time range", "requires nonzero increasing bounds")
 	}
-	if endTime.IsZero() {
-		return nil, NewValidationError("endTime", "cannot be zero")
+	if !isUTC(startTime) || !isUTC(endTime) {
+		return nil, NewValidationError("time range", "must be UTC")
 	}
-	if !isUTC(startTime) {
-		return nil, NewValidationError("startTime", "must be UTC")
-	}
-	if !isUTC(endTime) {
-		return nil, NewValidationError("endTime", "must be UTC")
-	}
-	if !endTime.After(startTime) {
-		return nil, NewValidationError("endTime", "must be after startTime")
-	}
-
-	q := url.Values{}
-	q.Set("bucketSize", podBillingBucketSize)
-	q.Set("endTime", endTime.UTC().Format(time.RFC3339Nano))
-	q.Set("grouping", podBillingGrouping)
-	q.Set("podId", podID)
-	q.Set("startTime", startTime.UTC().Format(time.RFC3339Nano))
-	normalizedQuery := q.Encode()
-
-	resp, err := c.makeRequest(ctx, http.MethodGet, "/billing/pods?"+normalizedQuery, nil)
+	q := url.Values{"podId": {podID}, "startTime": {startTime.Format(time.RFC3339Nano)}, "endTime": {endTime.Format(time.RFC3339Nano)}, "bucketSize": {"hour"}}
+	query := q.Encode()
+	resp, err := c.makeRequest(ctx, http.MethodGet, "/billing/pods?"+query, nil)
 	if err != nil {
 		return nil, fmt.Errorf("get pod billing history: %w", err)
 	}
 	defer resp.Body.Close()
-
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPodBillingResponseBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("get pod billing history: read response body: %w", err)
+		return nil, fmt.Errorf("read billing response: %w", err)
 	}
 	if len(body) > maxPodBillingResponseBytes {
-		return nil, newPodBillingEvidenceError(
-			PodBillingEvidenceResponseTooLarge,
-			normalizedQuery,
-			nil,
-			"response exceeds %d bytes",
-			maxPodBillingResponseBytes,
-		)
-	}
-	if c.debug {
-		c.logger.Printf("[DEBUG] Response Status: %d", resp.StatusCode)
-		c.logger.Printf("[DEBUG] Response Body: %s", string(body))
+		return nil, newPodBillingEvidenceError(PodBillingEvidenceResponseTooLarge, query, nil, "response exceeds %d bytes", maxPodBillingResponseBytes)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("get pod billing history: %w", c.parseErrorResponse(resp.StatusCode, resp.Header, body))
+		return nil, c.parseErrorResponse(resp.StatusCode, resp.Header, body)
 	}
-
-	records, total, decodeErr := decodePodBillingHistory(body, podID)
+	history, decodeErr := decodePodBillingHistory(body, podID, startTime, endTime)
 	if decodeErr != nil {
-		return nil, decodeErr.withEvidence(normalizedQuery, body)
+		decodeErr.NormalizedQuery = query
+		decodeErr.RawResponse = append([]byte(nil), body...)
+		return nil, decodeErr
 	}
-	return &PodBillingHistory{
-		NormalizedQuery:      normalizedQuery,
-		RawResponse:          append([]byte(nil), body...),
-		Records:              records,
-		TotalAmountUSDMicros: total,
-	}, nil
+	history.NormalizedQuery = query
+	history.RawResponse = append([]byte(nil), body...)
+	return history, nil
 }
 
-func (e *PodBillingEvidenceError) withEvidence(query string, raw []byte) *PodBillingEvidenceError {
-	return &PodBillingEvidenceError{
-		Kind:            e.Kind,
-		NormalizedQuery: query,
-		RawResponse:     append([]byte(nil), raw...),
-		cause:           e.cause,
-	}
-}
+func isUTC(t time.Time) bool { _, offset := t.Zone(); return offset == 0 }
 
 func newPodBillingEvidenceError(kind PodBillingEvidenceErrorKind, query string, raw []byte, format string, args ...any) *PodBillingEvidenceError {
-	return &PodBillingEvidenceError{
-		Kind:            kind,
-		NormalizedQuery: query,
-		RawResponse:     append([]byte(nil), raw...),
-		cause:           fmt.Errorf(format, args...),
-	}
+	return &PodBillingEvidenceError{Kind: kind, NormalizedQuery: query, RawResponse: append([]byte(nil), raw...), cause: fmt.Errorf(format, args...)}
 }
 
-func isUTC(t time.Time) bool {
-	_, offset := t.Zone()
-	return offset == 0
+type billingAmounts struct {
+	Total json.RawMessage `json:"totalAmount"`
+	GPU   json.RawMessage `json:"gpuAmount"`
+	CPU   json.RawMessage `json:"cpuAmount"`
+	Disk  json.RawMessage `json:"diskAmount"`
 }
 
-type rawPodBillingRecord struct {
-	Amount       json.RawMessage `json:"amount"`
-	PodID        *string         `json:"podId"`
-	Time         *string         `json:"time"`
-	TimeBilledMs *int64          `json:"timeBilledMs"`
-}
-
-func decodePodBillingHistory(body []byte, requestedPodID string) ([]PodBillingRecord, int64, *PodBillingEvidenceError) {
-	trimmed := bytes.TrimSpace(body)
-	if len(trimmed) == 0 || trimmed[0] != '[' {
-		return nil, 0, newPodBillingEvidenceError(PodBillingEvidenceSchemaAmbiguity, "", nil, "response must be a JSON array")
+func decodePodBillingHistory(body []byte, podID string, requestedStart, requestedEnd time.Time) (*PodBillingHistory, *PodBillingEvidenceError) {
+	refuse := func(format string, args ...any) (*PodBillingHistory, *PodBillingEvidenceError) {
+		return nil, newPodBillingEvidenceError(PodBillingEvidenceSchemaAmbiguity, "", nil, format, args...)
 	}
-
-	var rawRecords []rawPodBillingRecord
-	if err := json.Unmarshal(body, &rawRecords); err != nil {
-		return nil, 0, newPodBillingEvidenceError(PodBillingEvidenceSchemaAmbiguity, "", nil, "decode response: %v", err)
+	var payload struct {
+		Records *[]struct {
+			PodID     string    `json:"podId"`
+			StartTime time.Time `json:"startTime"`
+			EndTime   time.Time `json:"endTime"`
+			billingAmounts
+		} `json:"records"`
+		Metadata *struct {
+			Query          *PodBillingQuery `json:"query"`
+			RecordCount    *int             `json:"recordCount"`
+			UniquePodCount *int             `json:"uniquePodCount"`
+			Totals         *billingAmounts  `json:"totals"`
+		} `json:"metadata"`
 	}
-	records := make([]PodBillingRecord, 0, len(rawRecords))
-	var total int64
-	for i, raw := range rawRecords {
-		if raw.PodID == nil || *raw.PodID == "" {
-			return nil, 0, newPodBillingEvidenceError(PodBillingEvidenceSchemaAmbiguity, "", nil, "record %d omitted podId", i)
-		}
-		if *raw.PodID != requestedPodID {
-			return nil, 0, newPodBillingEvidenceError(PodBillingEvidenceSchemaAmbiguity, "", nil, "record %d names foreign pod %q, requested %q", i, *raw.PodID, requestedPodID)
-		}
-		if raw.Time == nil || *raw.Time == "" {
-			return nil, 0, newPodBillingEvidenceError(PodBillingEvidenceSchemaAmbiguity, "", nil, "record %d omitted time", i)
-		}
-		bucketTime, err := parsePodBillingBucketTime(*raw.Time)
-		if err != nil {
-			return nil, 0, newPodBillingEvidenceError(PodBillingEvidenceSchemaAmbiguity, "", nil, "record %d has invalid time: %v", i, err)
-		}
-		if len(raw.Amount) == 0 || bytes.Equal(bytes.TrimSpace(raw.Amount), []byte("null")) {
-			return nil, 0, newPodBillingEvidenceError(PodBillingEvidenceSchemaAmbiguity, "", nil, "record %d omitted amount", i)
-		}
-		amountMicros, err := parseJSONUSDMicrosNearest(raw.Amount)
-		if err != nil {
-			kind := PodBillingEvidenceSchemaAmbiguity
-			if moneyErr, ok := err.(*usdMicrosParseError); ok && moneyErr.kind == usdMicrosOverflow {
-				kind = PodBillingEvidenceAmountOverflow
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return refuse("decode billing response: %v", err)
+	}
+	meta := payload.Metadata
+	if payload.Records == nil || meta == nil || meta.Query == nil || meta.RecordCount == nil || meta.UniquePodCount == nil || meta.Totals == nil {
+		return refuse("billing response omitted records or metadata")
+	}
+	query := meta.Query
+	if query.PodID != podID || query.BucketSize != "hour" || query.StartTime.IsZero() || !query.EndTime.After(query.StartTime) {
+		return refuse("billing metadata does not identify the requested hourly pod window")
+	}
+	expectedStart := requestedStart.UTC().Truncate(time.Hour)
+	expectedEnd := requestedEnd.UTC().Truncate(time.Hour)
+	if expectedEnd.Before(requestedEnd) {
+		expectedEnd = expectedEnd.Add(time.Hour)
+	}
+	if !query.StartTime.Equal(expectedStart) || !query.EndTime.Equal(expectedEnd) {
+		return refuse("billing metadata resolved a different hourly window than requested")
+	}
+	records := *payload.Records
+	unique := 0
+	if len(records) > 0 {
+		unique = 1
+	}
+	if *meta.RecordCount != len(records) || *meta.UniquePodCount != unique {
+		return refuse("billing metadata count disagrees with records")
+	}
+	amounts := func(raw billingAmounts) ([4]int64, error) {
+		var out [4]int64
+		for i, b := range []json.RawMessage{raw.Total, raw.GPU, raw.CPU, raw.Disk} {
+			v, err := parseJSONUSDMicrosNearest(b)
+			if err != nil {
+				return out, err
 			}
-			return nil, 0, newPodBillingEvidenceError(kind, "", nil, "record %d amount: %v", i, err)
+			out[i] = v
 		}
-		if raw.TimeBilledMs == nil {
-			return nil, 0, newPodBillingEvidenceError(PodBillingEvidenceSchemaAmbiguity, "", nil, "record %d omitted timeBilledMs", i)
-		}
-		if *raw.TimeBilledMs < 0 {
-			return nil, 0, newPodBillingEvidenceError(PodBillingEvidenceSchemaAmbiguity, "", nil, "record %d has negative timeBilledMs", i)
-		}
-		if (amountMicros > 0 && total > math.MaxInt64-amountMicros) ||
-			(amountMicros < 0 && total < math.MinInt64-amountMicros) {
-			return nil, 0, newPodBillingEvidenceError(PodBillingEvidenceAmountOverflow, "", nil, "record %d makes total USD micros overflow", i)
-		}
-		total += amountMicros
-		records = append(records, PodBillingRecord{
-			PodID:           *raw.PodID,
-			BucketStart:     bucketTime.UTC(),
-			AmountUSDMicros: amountMicros,
-			TimeBilledMs:    *raw.TimeBilledMs,
-		})
+		return out, nil
 	}
-	return records, total, nil
-}
+	amountError := func(err error, format string, args ...any) (*PodBillingHistory, *PodBillingEvidenceError) {
+		var parseErr *usdMicrosParseError
+		kind := PodBillingEvidenceSchemaAmbiguity
+		if errors.As(err, &parseErr) && parseErr.kind == usdMicrosOverflow {
+			kind = PodBillingEvidenceAmountOverflow
+		}
+		return nil, newPodBillingEvidenceError(kind, "", nil, format, args...)
+	}
+	totals, err := amounts(*meta.Totals)
+	if err != nil {
+		return amountError(err, "invalid billing totals: %v", err)
+	}
+	out := &PodBillingHistory{Query: *query, Records: make([]PodBillingRecord, 0, len(records)), MetadataTotalAmountUSDMicros: totals[0]}
+	seen := map[time.Time]bool{}
+	sums := [4]*big.Int{new(big.Int), new(big.Int), new(big.Int), new(big.Int)}
+	for i, record := range records {
+		if record.PodID != podID || record.StartTime.IsZero() || !record.EndTime.After(record.StartTime) || record.StartTime.Before(query.StartTime) || record.EndTime.After(query.EndTime) || !record.StartTime.Equal(record.StartTime.UTC().Truncate(time.Hour)) || record.EndTime.Sub(record.StartTime) != time.Hour || seen[record.StartTime.UTC()] {
+			return refuse("record %d has foreign pod, invalid range, or duplicate bucket", i)
+		}
+		seen[record.StartTime.UTC()] = true
+		a, err := amounts(record.billingAmounts)
+		if err != nil {
+			return amountError(err, "record %d has invalid amounts: %v", i, err)
+		}
+		// The four independently rounded values can differ by at most two
+		// micros: half a micro each for total, GPU, CPU, and disk.
+		components := new(big.Int).Add(big.NewInt(a[1]), big.NewInt(a[2]))
+		components.Add(components, big.NewInt(a[3]))
+		difference := new(big.Int).Sub(big.NewInt(a[0]), components)
+		if difference.Abs(difference).Cmp(big.NewInt(2)) > 0 {
+			return refuse("record %d total disagrees with its GPU, CPU, and disk components", i)
+		}
+		for component, value := range a {
+			sums[component].Add(sums[component], big.NewInt(value))
+		}
 
-// parsePodBillingBucketTime accepts an RFC 3339 instant or RunPod's zoneless
-// UTC bucket layout; any other zoneless form stays ambiguous.
-func parsePodBillingBucketTime(raw string) (time.Time, error) {
-	if t, err := time.Parse(time.RFC3339Nano, raw); err == nil {
-		return t, nil
+		out.Records = append(out.Records, PodBillingRecord{PodID: podID, BucketStart: record.StartTime, BucketEnd: record.EndTime, AmountUSDMicros: a[0], GPUAmountUSDMicros: a[1], CPUAmountUSDMicros: a[2], DiskAmountUSDMicros: a[3]})
 	}
-	return time.ParseInLocation(podBillingBucketLayout, raw, time.UTC)
+	if !sums[0].IsInt64() {
+		return nil, newPodBillingEvidenceError(PodBillingEvidenceAmountOverflow, "", nil, "billing total overflows USD micros")
+	}
+	// Rounding N records separately, then rounding their aggregate, permits
+	// floor((N+1)/2) micros of difference. An empty list permits none.
+	tolerance := big.NewInt(int64((len(records) + 1) / 2))
+	for component, value := range totals {
+		difference := new(big.Int).Sub(big.NewInt(value), sums[component])
+		if difference.Abs(difference).Cmp(tolerance) > 0 {
+			return refuse("billing metadata %s disagrees with records", []string{"totalAmount", "gpuAmount", "cpuAmount", "diskAmount"}[component])
+		}
+	}
+	out.TotalAmountUSDMicros = sums[0].Int64()
+	return out, nil
 }

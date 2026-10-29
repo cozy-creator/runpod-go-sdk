@@ -2,8 +2,7 @@ package runpod_test
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,226 +11,78 @@ import (
 	runpod "github.com/cozy-creator/runpod-go-sdk"
 )
 
-type testGraphQLRequest struct {
-	Query     string                 `json:"query"`
-	Variables map[string]interface{} `json:"variables"`
-}
+const catalogGPU = `{"id":"gpu/a","name":"GPU A","pool":null,"manufacturer":"NVIDIA","memory":24,"secure":true,"community":true,"price":{"secure":0.31,"community":0.23},"maxCount":{"secure":8,"community":4},"availability":"HIGH","dataCenters":[{"id":"dc1","name":"DC 1","availability":"LOW"}]}`
+const catalogCPU = `{"id":"cpu5c","name":"Compute","group":"Gen 5","vcpu":{"min":2,"max":32},"ramGbPerVcpu":2.5,"price":{"securePerVcpu":0.011234,"serverlessPerVcpu":0.01},"availability":"HIGH","dataCenters":[{"id":"dc1","name":"DC 1","availability":"MEDIUM"}]}`
+const catalogDCs = `{"dataCenters":[{"id":"dc1","name":"DC 1","region":"EUROPE","networkVolumeTypes":["STANDARD"],"compliance":[],"globalNetwork":false}]}`
 
-func newGPUTypeGraphQLServer(t *testing.T, handler func(req testGraphQLRequest) interface{}) *httptest.Server {
+func newCatalogClient(t *testing.T, handler http.HandlerFunc) *runpod.Client {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.URL.Query().Get("api_key"); got != "" {
-			t.Fatalf("api key must not leak into the URL, got %q", got)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method=%s", r.Method)
 		}
-		if got := r.Header.Get("Authorization"); got != "Bearer test_key" {
-			t.Fatalf("expected authorization header, got %q", got)
+		if r.Header.Get("Authorization") != "Bearer test_key" {
+			t.Errorf("missing bearer token")
 		}
-
-		var req testGraphQLRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode request: %v", err)
+		if r.URL.Query().Has("api_key") {
+			t.Errorf("credential leaked in query")
 		}
-		_ = r.Body.Close()
-
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(handler(req))
+		handler(w, r)
 	}))
+	t.Cleanup(server.Close)
+	return mustClient(t, "test_key", runpod.WithBaseURL(server.URL+"/v2"))
 }
-
-func TestListGPUTypes_Filtering(t *testing.T) {
-	server := newGPUTypeGraphQLServer(t, func(req testGraphQLRequest) interface{} {
-		if !strings.Contains(req.Query, "gpuTypes") {
-			t.Fatalf("expected gpuTypes query")
+func writeGPUs(w http.ResponseWriter, row string) { fmt.Fprintf(w, `{"gpus":[%s]}`, row) }
+func TestListGPUTypesUsesScopedV2Catalog(t *testing.T) {
+	c := newCatalogClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/catalog/gpus" {
+			t.Errorf("path=%s", r.URL.Path)
 		}
-		return map[string]interface{}{
-			"data": map[string]interface{}{
-				"gpuTypes": []map[string]interface{}{
-					{
-						"id":             "NVIDIA GeForce RTX 4090",
-						"displayName":    "RTX 4090",
-						"memoryInGb":     24,
-						"secureCloud":    true,
-						"communityCloud": true,
-						"lowestPrice": map[string]interface{}{
-							"minimumBidPrice":      0.10,
-							"uninterruptablePrice": 0.49,
-							"stockStatus":          "AVAILABLE",
-						},
-					},
-					{
-						"id":             "NVIDIA A100 SXM",
-						"displayName":    "A100",
-						"memoryInGb":     80,
-						"secureCloud":    false,
-						"communityCloud": true,
-						"lowestPrice": map[string]interface{}{
-							"minimumBidPrice":      1.10,
-							"uninterruptablePrice": 2.49,
-							"stockStatus":          "LOW",
-						},
-					},
-					{
-						"id":             "NVIDIA H100 SXM",
-						"displayName":    "H100",
-						"memoryInGb":     80,
-						"secureCloud":    true,
-						"communityCloud": true,
-						"lowestPrice":    nil,
-					},
-				},
-			},
+		q := r.URL.Query()
+		for k, want := range map[string]string{"include": "AVAILABILITY", "product": "POD", "cloud": "COMMUNITY", "count": "4", "minCudaVersion": "12.8", "countryCodes": "FR,DE"} {
+			if q.Get(k) != want {
+				t.Errorf("%s=%q want %q", k, q.Get(k), want)
+			}
 		}
+		writeGPUs(w, catalogGPU)
 	})
-	defer server.Close()
-
-	client := mustClient(t, "test_key", runpod.WithGraphQLBaseURL(server.URL))
-	got, err := client.ListGPUTypes(context.Background(), &runpod.GPUTypeFilter{
-		IDs:            []string{"NVIDIA GeForce RTX 4090", "NVIDIA A100 SXM"},
-		MinCudaVersion: "12.8",
-		SecureCloud:    ptrBool(true),
-	})
-	if err != nil {
-		t.Fatalf("ListGPUTypes error: %v", err)
+	gpus, err := c.ListGPUTypes(context.Background(), &runpod.GPUTypeFilter{IDs: []string{"gpu/a"}, CloudType: "COMMUNITY", GPUCount: 4, MinCudaVersion: "12.8", CountryCodes: []string{"FR", "DE"}})
+	if err != nil || len(gpus) != 1 {
+		t.Fatalf("gpus=%+v err=%v", gpus, err)
 	}
-
-	if len(got) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(got))
-	}
-	if got[0].ID != "NVIDIA GeForce RTX 4090" {
-		t.Fatalf("unexpected gpu id %q", got[0].ID)
+	if gpus[0].Name != "GPU A" || gpus[0].Memory != 24 || gpus[0].Price.Community == nil || *gpus[0].Price.Community != 230000 {
+		t.Fatalf("gpu=%+v", gpus[0])
 	}
 }
-
-func TestListAvailableGPUs_OnlyAvailable(t *testing.T) {
-	server := newGPUTypeGraphQLServer(t, func(req testGraphQLRequest) interface{} {
-		return map[string]interface{}{
-			"data": map[string]interface{}{
-				"gpuTypes": []map[string]interface{}{
-					{
-						"id":             "gpu-1",
-						"displayName":    "GPU 1",
-						"memoryInGb":     24,
-						"secureCloud":    true,
-						"communityCloud": false,
-						"lowestPrice": map[string]interface{}{
-							"minimumBidPrice":      0.45,
-							"uninterruptablePrice": 0.90,
-							"stockStatus":          "AVAILABLE",
-						},
-					},
-					{
-						"id":             "gpu-2",
-						"displayName":    "GPU 2",
-						"memoryInGb":     24,
-						"secureCloud":    true,
-						"communityCloud": false,
-						"lowestPrice": map[string]interface{}{
-							"minimumBidPrice":      0.40,
-							"uninterruptablePrice": 0.80,
-							"stockStatus":          "OUT_OF_STOCK",
-						},
-					},
-					{
-						"id":             "gpu-3",
-						"displayName":    "GPU 3",
-						"memoryInGb":     24,
-						"secureCloud":    true,
-						"communityCloud": false,
-						"lowestPrice": map[string]interface{}{
-							"minimumBidPrice":      0.35,
-							"uninterruptablePrice": 0.70,
-							"stockStatus":          "LOW",
-						},
-					},
-					{
-						"id":             "gpu-4",
-						"displayName":    "GPU 4",
-						"memoryInGb":     48,
-						"secureCloud":    true,
-						"communityCloud": false,
-						"lowestPrice": map[string]interface{}{
-							"minimumBidPrice":      0.55,
-							"uninterruptablePrice": 1.10,
-							"stockStatus":          "Medium",
-							"availableGpuCounts":   []int{1, 2},
-						},
-					},
-					{
-						"id":             "gpu-5",
-						"displayName":    "GPU 5",
-						"memoryInGb":     80,
-						"secureCloud":    true,
-						"communityCloud": false,
-						"lowestPrice": map[string]interface{}{
-							"minimumBidPrice":      0.25,
-							"uninterruptablePrice": 0.50,
-							"stockStatus":          "None",
-						},
-					},
-				},
-			},
+func TestGetGPUTypeUsesNativeSingleResource(t *testing.T) {
+	c := newCatalogClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/v2/catalog/gpus/gpu%2Fa" {
+			t.Errorf("escaped path=%s", r.URL.EscapedPath())
 		}
+		fmt.Fprint(w, catalogGPU)
 	})
-	defer server.Close()
-
-	client := mustClient(t, "test_key", runpod.WithGraphQLBaseURL(server.URL))
-	got, err := client.ListAvailableGPUs(context.Background(), "12.8", 1)
-	if err != nil {
-		t.Fatalf("ListAvailableGPUs error: %v", err)
-	}
-
-	if len(got) != 3 {
-		t.Fatalf("expected 3 available GPUs, got %d", len(got))
-	}
-	// sorted by uninterruptablePrice asc
-	if got[0].ID != "gpu-3" || got[1].ID != "gpu-1" || got[2].ID != "gpu-4" {
-		t.Fatalf("unexpected order: %#v", got)
-	}
-	if counts := got[2].LowestPrice.AvailableGPUCounts; len(counts) != 2 || counts[0] != 1 || counts[1] != 2 {
-		t.Fatalf("available GPU counts = %#v", counts)
+	gpu, err := c.GetGPUType(context.Background(), "gpu/a")
+	if err != nil || gpu.ID != "gpu/a" {
+		t.Fatalf("gpu=%+v err=%v", gpu, err)
 	}
 }
-
-func TestGetGPUType(t *testing.T) {
-	server := newGPUTypeGraphQLServer(t, func(req testGraphQLRequest) interface{} {
-		return map[string]interface{}{
-			"data": map[string]interface{}{
-				"gpuTypes": []map[string]interface{}{
-					{
-						"id":             "gpu-1",
-						"displayName":    "GPU 1",
-						"memoryInGb":     24,
-						"secureCloud":    true,
-						"communityCloud": false,
-						"lowestPrice": map[string]interface{}{
-							"minimumBidPrice":      0.61,
-							"uninterruptablePrice": 1.23,
-							"stockStatus":          "AVAILABLE",
-						},
-					},
-				},
-			},
-		}
-	})
-	defer server.Close()
-
-	client := mustClient(t, "test_key", runpod.WithGraphQLBaseURL(server.URL))
-
-	found, err := client.GetGPUType(context.Background(), "gpu-1")
-	if err != nil {
-		t.Fatalf("GetGPUType should succeed: %v", err)
-	}
-	if found.ID != "gpu-1" {
-		t.Fatalf("unexpected id %q", found.ID)
-	}
-
-	_, err = client.GetGPUType(context.Background(), "missing-gpu")
-	if err == nil {
-		t.Fatal("expected not found error")
-	}
-	if !errors.Is(err, runpod.ErrNotFound) {
-		t.Fatalf("expected ErrNotFound, got %v", err)
+func TestGPUCatalogRefusesIncompleteAndDuplicateRows(t *testing.T) {
+	for _, body := range []string{`{}`, `{"gpus":null}`, `[]`, `{"gpus":[{}]}`, `{"gpus":[` + catalogGPU + `,` + catalogGPU + `]}`,
+		`{"gpus":[` + strings.Replace(catalogGPU, `"secure":true,`, "", 1) + `]}`, `{"gpus":[` + strings.Replace(catalogGPU, `"availability":"HIGH"`, `"availability":"mystery"`, 1) + `]}`} {
+		t.Run(body, func(t *testing.T) {
+			c := newCatalogClient(t, func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) })
+			if _, err := c.ListGPUTypes(context.Background(), nil); err == nil {
+				t.Fatal("accepted incomplete catalog")
+			}
+		})
 	}
 }
-
-func ptrBool(v bool) *bool { return &v }
+func TestGPUCatalogFiltersValidateBeforeHTTP(t *testing.T) {
+	c := newCatalogClient(t, func(http.ResponseWriter, *http.Request) { t.Fatal("sent HTTP for invalid filter") })
+	for _, f := range []runpod.GPUTypeFilter{{GPUCount: -1}, {CloudType: "other"}, {MinCudaVersion: "12"}, {MinCudaVersion: "12.8", AllowedCudaVersions: []string{"12.9"}}, {CountryCodes: []string{"fr"}}} {
+		if _, err := c.ListGPUTypes(context.Background(), &f); err == nil {
+			t.Fatalf("accepted %+v", f)
+		}
+	}
+}

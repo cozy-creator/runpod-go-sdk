@@ -46,7 +46,7 @@ func TestCooldownBeginsAtHeadersBeforeBlockedResponseBody(t *testing.T) {
 	go func() { finished <- client.Get(t.Context(), "/pods", nil) }()
 	<-body.entered
 	now.Add(int64(100 * time.Second))
-	second := client.GraphQL(t.Context(), "query { myself { id } }", nil, nil)
+	second := client.Get(t.Context(), "/catalog/gpus", nil)
 	close(body.release)
 	first := <-finished
 	var original *APIError
@@ -84,7 +84,7 @@ func TestCooldownClockExpiryAndConcurrentCallers(t *testing.T) {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			err := client.GraphQL(t.Context(), "query { myself { id } }", nil, nil)
+			err := client.Get(t.Context(), "/catalog/gpus", nil)
 			var limited *APIError
 			if !errors.As(err, &limited) || limited.RetryAfter != 4200*time.Second || limited.Code != "FIRST" {
 				t.Errorf("retained cooldown: %#v, %v", limited, err)

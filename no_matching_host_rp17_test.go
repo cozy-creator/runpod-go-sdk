@@ -77,7 +77,7 @@ func TestEveryCandidateRejectingTheShapeIsReportedAsARequestDefect(t *testing.T)
 		`{"error":"`+rp17ObservedMessage+`"}`)
 	defer server.Close()
 
-	_, err := fallbackClient(t, server.URL).CreatePod(context.Background(), baseGPURequest("A", "B", "C"))
+	_, err := fallbackClient(t, server.URL).CreatePodWithFallback(context.Background(), baseGPURequest("A"), []string{"A", "B", "C"}, nil)
 	var exhausted *runpod.FallbackExhaustedError
 	if !errors.As(err, &exhausted) {
 		t.Fatalf("expected *FallbackExhaustedError, got %T: %v", err, err)
@@ -102,7 +102,7 @@ func TestAllStockOutIsNotReportedAsARequestDefect(t *testing.T) {
 		`{"error":"There are no instances currently available."}`)
 	defer server.Close()
 
-	_, err := fallbackClient(t, server.URL).CreatePod(context.Background(), baseGPURequest("A", "B"))
+	_, err := fallbackClient(t, server.URL).CreatePodWithFallback(context.Background(), baseGPURequest("A"), []string{"A", "B"}, nil)
 	var exhausted *runpod.FallbackExhaustedError
 	if !errors.As(err, &exhausted) {
 		t.Fatalf("expected *FallbackExhaustedError, got %T", err)
@@ -138,10 +138,10 @@ func TestEmptyFanOutIsNotARequestDefect(t *testing.T) {
 // capacity answer and a different card cannot fix it.
 func TestInvalidRequestStillAbortsAndIsNotCapacity(t *testing.T) {
 	server, attempted := newFallbackServer(t, map[string]int{"A": 400, "B": 0},
-		`{"error":"body/gpuTypeIds/0 must be one of the allowed values"}`)
+		`{"error":"body/gpu/id must be one of the allowed values"}`)
 	defer server.Close()
 
-	_, err := fallbackClient(t, server.URL).CreatePod(context.Background(), baseGPURequest("A", "B"))
+	_, err := fallbackClient(t, server.URL).CreatePodWithFallback(context.Background(), baseGPURequest("A"), []string{"A", "B"}, nil)
 	if errors.Is(err, runpod.ErrNoCapacity) {
 		t.Fatalf("a 4xx validation refusal must never classify as capacity: %v", err)
 	}

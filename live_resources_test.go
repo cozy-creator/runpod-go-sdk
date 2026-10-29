@@ -4,137 +4,97 @@ package runpod_test
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	runpod "github.com/cozy-creator/runpod-go-sdk"
 )
 
+// liveClient only reads explicitly supplied credentials. It never loads .env.
 func liveClient(t *testing.T) *runpod.Client {
 	t.Helper()
-	apiKey := os.Getenv("RUNPOD_API_KEY")
-	if apiKey == "" {
+	key := os.Getenv("RUNPOD_API_KEY")
+	if key == "" {
 		t.Skip("live test: RUNPOD_API_KEY not set")
 	}
-	return mustClient(t, apiKey)
+	return mustClient(t, key)
+}
+func liveReadContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	t.Cleanup(cancel)
+	return ctx
 }
 
-// TestNetworkVolumesLive verifies REST parity against the real API.
 func TestNetworkVolumesLive(t *testing.T) {
-	client := liveClient(t)
-	volumes, err := client.ListNetworkVolumes(context.Background())
+	volumes, err := liveClient(t).ListNetworkVolumes(liveReadContext(t))
 	if err != nil {
-		t.Fatalf("live list network volumes: %v", err)
+		t.Fatal(err)
 	}
 	for _, v := range volumes {
-		if v.ID == "" {
-			t.Fatalf("live volume with empty id: %+v", v)
+		if v.ID == "" || v.DataCenter == "" {
+			t.Fatalf("incomplete volume=%+v", v)
 		}
-		t.Logf("volume id=%s name=%s size=%dGB dc=%s", v.ID, v.Name, v.Size, v.DataCenterID)
+		t.Logf("volume=%s size=%dGB datacenter=%s type=%s", v.ID, v.Size, v.DataCenter, v.Type)
 	}
 }
-
-// TestContainerRegistryAuthsLive verifies the REST endpoint against the real API.
 func TestContainerRegistryAuthsLive(t *testing.T) {
-	client := liveClient(t)
-	auths, err := client.ListContainerRegistryAuths(context.Background())
+	auths, err := liveClient(t).ListContainerRegistryAuths(liveReadContext(t))
 	if err != nil {
-		t.Fatalf("live list container registry auths: %v", err)
+		t.Fatal(err)
 	}
-	for _, a := range auths {
-		t.Logf("registry auth id=%s name=%s", a.ID, a.Name)
+	for _, auth := range auths {
+		if auth.ID == "" {
+			t.Fatal("registry missing id")
+		}
+		t.Logf("registry=%s name=%s", auth.ID, auth.Name)
 	}
 }
-
-// TestGPUCatalogIDsLive verifies every static catalog entry's type ID exists
-// in RunPod's live gpuTypes catalog.
 func TestGPUCatalogIDsLive(t *testing.T) {
-	client := liveClient(t)
-	gpus, err := client.ListGPUTypes(context.Background(), nil)
+	gpus, err := liveClient(t).ListGPUTypes(liveReadContext(t), nil)
 	if err != nil {
-		t.Fatalf("live ListGPUTypes: %v", err)
+		t.Fatal(err)
 	}
-	liveIDs := map[string]bool{}
-	for _, g := range gpus {
-		liveIDs[strings.ToLower(strings.TrimSpace(g.ID))] = true
+	ids := map[string]bool{}
+	for _, gpu := range gpus {
+		ids[strings.ToLower(gpu.ID)] = true
 	}
 	for _, spec := range runpod.GPUCatalog() {
-		if !liveIDs[strings.ToLower(spec.ID)] {
-			t.Errorf("catalog GPU type %q not found in live gpuTypes", spec.ID)
+		if !ids[strings.ToLower(spec.ID)] {
+			t.Errorf("static GPU type %q missing from v2 catalog", spec.ID)
 		}
 	}
 }
-
-// TestGPUOffersLive verifies the aliased per-cloud lowestPrice query
-// validates against the real GraphQL schema.
 func TestGPUOffersLive(t *testing.T) {
-	client := liveClient(t)
-	offers, err := client.ListGPUOffers(context.Background(), &runpod.GPUOfferFilter{InStockOnly: true})
+	offers, err := liveClient(t).ListGPUOffers(liveReadContext(t), &runpod.GPUOfferFilter{InStockOnly: true})
 	if err != nil {
-		t.Fatalf("live ListGPUOffers: %v", err)
+		t.Fatal(err)
 	}
-	if len(offers) == 0 {
-		t.Fatal("expected at least one in-stock offer")
-	}
-	for _, o := range offers[:min(len(offers), 5)] {
-		minimumBid := "unavailable"
-		if o.MinimumBidPriceUSDMicrosPerHour != nil {
-			minimumBid = fmt.Sprintf("$%.6f", float64(*o.MinimumBidPriceUSDMicrosPerHour)/1_000_000)
+	// An empty market is valid provider evidence, not a test failure.
+	for _, offer := range offers[:min(len(offers), 5)] {
+		if offer.PriceSource != runpod.CatalogListPrice {
+			t.Fatalf("missing catalog price provenance: %+v", offer)
 		}
-		t.Logf("offer %s cloud=%s stock=%s ondemand=$%.6f minbid=%s",
-			o.GPUTypeID, o.CloudType, o.StockStatus,
-			float64(o.OnDemandPriceUSDMicrosPerHour)/1_000_000, minimumBid)
+		t.Logf("GPU=%s cloud=%s stock=%s rate=%d USD micros/hour source=%s", offer.GPUTypeID, offer.CloudType, offer.StockStatus, offer.OnDemandPriceUSDMicrosPerHour, offer.PriceSource)
 	}
 }
-
-// TestSpotPodReclaimLive creates a cheap interruptible pod with a bid and
-// polls it briefly. Costs real money: additionally gated on
-// RUNPOD_LIVE_SPOT=1. Reclaim rarely happens inside the poll window; the
-// test asserts the create/bid path works and logs observed transitions.
-func TestSpotPodReclaimLive(t *testing.T) {
-	if os.Getenv("RUNPOD_LIVE_SPOT") != "1" {
-		t.Skip("live spot test: RUNPOD_LIVE_SPOT not set")
-	}
+func TestExistingPodsReadOnlyLive(t *testing.T) {
 	client := liveClient(t)
-	ctx := context.Background()
-
-	offers, err := client.ListGPUOffers(ctx, &runpod.GPUOfferFilter{InStockOnly: true})
-	if err != nil || len(offers) == 0 {
-		t.Fatalf("no offers: %v", err)
-	}
-	offer := offers[0] // cheapest in stock
-	minimumBid, ok := offer.MinimumBidPerGPUUSDMicrosPerHour()
-	if !ok {
-		t.Skip("cheapest offer has no current spot floor")
-	}
-
-	pod, err := client.CreateSpotPod(ctx, &runpod.CreatePodRequest{
-		Name:                      "sdk-live-spot-test",
-		ImageName:                 "tensorhub/worker:torch2.13.0-cu130-cp312-linux-x86",
-		GPUTypeIDs:                []string{offer.GPUTypeID},
-		GPUCount:                  1,
-		ContainerDiskInGB:         10,
-		CloudType:                 offer.CloudType,
-		BidPerGPUUSDMicrosPerHour: minimumBid,
-	})
+	ctx := liveReadContext(t)
+	pods, err := client.ListPods(ctx, nil)
 	if err != nil {
-		t.Fatalf("CreateSpotPod: %v", err)
+		t.Fatal(err)
 	}
-	defer func() {
-		if err := client.TerminatePod(context.Background(), pod.ID); err != nil {
-			t.Errorf("cleanup TerminatePod: %v", err)
+	for _, pod := range pods[:min(len(pods), 3)] {
+		snapshot, err := client.GetPodReadback(ctx, pod.ID)
+		if err != nil {
+			t.Fatalf("pod %s: %v", pod.ID, err)
 		}
-	}()
-	t.Logf("spot pod %s created on %s bid=%d USD micros/hour", pod.ID, offer.GPUTypeID, minimumBid)
-
-	got, err := client.GetPod(ctx, pod.ID)
-	if err != nil {
-		t.Fatalf("GetPod: %v", err)
+		if snapshot.REST.ID != pod.ID {
+			t.Fatal("foreign pod response")
+		}
+		t.Logf("pod=%s status=%s", pod.ID, snapshot.REST.Status)
 	}
-	if !got.Interruptible {
-		t.Errorf("pod not marked interruptible: %+v", got)
-	}
-	t.Logf("status=%s", got.DesiredStatus)
 }

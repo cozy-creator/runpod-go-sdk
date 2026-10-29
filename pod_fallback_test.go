@@ -26,16 +26,14 @@ func newFallbackServer(t *testing.T, responses map[string]int, body string) (*ht
 		if r.Method != http.MethodPost || r.URL.Path != "/pods" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
-		var req struct {
-			GPUTypeIDs []string `json:"gpuTypeIds"`
-		}
+		var req runpod.CreatePodRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		if len(req.GPUTypeIDs) != 1 {
-			t.Fatalf("fan-out must send exactly one gpuTypeId per request, got %v", req.GPUTypeIDs)
+		if req.GPU == nil {
+			t.Fatal("request omitted GPU")
 		}
-		gpuType := req.GPUTypeIDs[0]
+		gpuType := req.GPU.ID
 		mu.Lock()
 		attempted = append(attempted, gpuType)
 		mu.Unlock()
@@ -43,7 +41,7 @@ func newFallbackServer(t *testing.T, responses map[string]int, body string) (*ht
 		status := responses[gpuType]
 		w.Header().Set("Content-Type", "application/json")
 		if status == 0 {
-			fmt.Fprintf(w, `{"id":"pod-%s","name":"n","desiredStatus":"RUNNING"}`, gpuType)
+			fmt.Fprintf(w, `{"id":"pod-%s","name":"n","status":"RUNNING"}`, gpuType)
 			return
 		}
 		w.WriteHeader(status)
@@ -68,13 +66,7 @@ func fallbackClient(t *testing.T, url string) *runpod.Client {
 }
 
 func baseGPURequest(types ...string) *runpod.CreatePodRequest {
-	return &runpod.CreatePodRequest{
-		Name:              "n",
-		ImageName:         "img",
-		GPUTypeIDs:        types,
-		GPUCount:          1,
-		ContainerDiskInGB: 10,
-	}
+	return &runpod.CreatePodRequest{Name: "n", Image: "img", GPU: &runpod.CreateGPUConfig{ID: types[0], Count: 1}, Disk: 10}
 }
 
 func TestFallback_FirstStockOutSecondSucceeds(t *testing.T) {
@@ -83,7 +75,7 @@ func TestFallback_FirstStockOutSecondSucceeds(t *testing.T) {
 		`{"error":"no instances available"}`)
 	defer server.Close()
 
-	pod, err := fallbackClient(t, server.URL).CreatePod(context.Background(), baseGPURequest("A", "B"))
+	pod, err := fallbackClient(t, server.URL).CreatePodWithFallback(context.Background(), baseGPURequest("A"), []string{"A", "B"}, nil)
 	if err != nil {
 		t.Fatalf("expected success on second candidate, got %v", err)
 	}
@@ -101,7 +93,7 @@ func TestFallback_AllStockOut(t *testing.T) {
 		`{"error":"no instances available"}`)
 	defer server.Close()
 
-	_, err := fallbackClient(t, server.URL).CreatePod(context.Background(), baseGPURequest("A", "B"))
+	_, err := fallbackClient(t, server.URL).CreatePodWithFallback(context.Background(), baseGPURequest("A"), []string{"A", "B"}, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -130,7 +122,7 @@ func TestFallback_AbortsOnClientError(t *testing.T) {
 		`{"error":"invalid request"}`)
 	defer server.Close()
 
-	_, err := fallbackClient(t, server.URL).CreatePod(context.Background(), baseGPURequest("A", "B"))
+	_, err := fallbackClient(t, server.URL).CreatePodWithFallback(context.Background(), baseGPURequest("A"), []string{"A", "B"}, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -206,7 +198,7 @@ func TestFallback_PlainServerErrorIsAmbiguousAndAborts(t *testing.T) {
 		`{"error":"bad gateway"}`)
 	defer server.Close()
 
-	_, err := fallbackClient(t, server.URL).CreatePod(context.Background(), baseGPURequest("A", "B"))
+	_, err := fallbackClient(t, server.URL).CreatePodWithFallback(context.Background(), baseGPURequest("A"), []string{"A", "B"}, nil)
 	if err == nil {
 		t.Fatal("unclassified 5xx must remain ambiguous")
 	}
@@ -242,7 +234,7 @@ func TestFallback_CandidateFilterAndFailureHook(t *testing.T) {
 	}
 
 	client := fallbackClient(t, server.URL)
-	pod, err := client.CreatePodWithFallback(context.Background(), baseGPURequest("A", "B", "C"), nil, opts)
+	pod, err := client.CreatePodWithFallback(context.Background(), baseGPURequest("A"), []string{"A", "B", "C"}, opts)
 	if err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
@@ -276,7 +268,7 @@ func TestFallback_ContextCancelledEarlyExit(t *testing.T) {
 		}),
 	)
 
-	_, err := client.CreatePod(ctx, baseGPURequest("A", "B"))
+	_, err := client.CreatePodWithFallback(ctx, baseGPURequest("A"), []string{"A", "B"}, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}

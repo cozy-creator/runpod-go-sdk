@@ -2,36 +2,29 @@ package runpod
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 )
 
 // ListContainerRegistryAuths lists stored container registry credentials.
 func (c *Client) ListContainerRegistryAuths(ctx context.Context) ([]ContainerRegistryAuth, error) {
-	// Accept both bare array and object wrapper shapes.
-	var raw json.RawMessage
-	if err := c.Get(ctx, "/containerregistryauth", &raw); err != nil {
-		return nil, fmt.Errorf("failed to list container registry auths: %w", err)
+	rows, err := decodeList[ContainerRegistryAuth](ctx, c, "/registries", "registries")
+	if err != nil {
+		return nil, err
 	}
-	if len(raw) == 0 {
-		return nil, nil
+	seen := map[string]bool{}
+	for _, row := range rows {
+		if err := validateResourceIdentity("registry", row.ID, row.Name, ""); err != nil {
+			return nil, err
+		}
+		if seen[row.ID] {
+			return nil, fmt.Errorf("registry list repeated id %q", row.ID)
+		}
+		seen[row.ID] = true
 	}
-
-	var auths []ContainerRegistryAuth
-	if err := json.Unmarshal(raw, &auths); err == nil {
-		return auths, nil
-	}
-
-	var wrapped struct {
-		ContainerRegistryAuths []ContainerRegistryAuth `json:"containerRegistryAuths"`
-	}
-	if err := json.Unmarshal(raw, &wrapped); err == nil && wrapped.ContainerRegistryAuths != nil {
-		return wrapped.ContainerRegistryAuths, nil
-	}
-
-	return nil, fmt.Errorf("failed to list container registry auths: unexpected response shape")
+	return rows, nil
 }
 
 // CreateContainerRegistryAuth stores a Docker registry credential. Names must
@@ -51,25 +44,47 @@ func (c *Client) CreateContainerRegistryAuth(ctx context.Context, req *CreateCon
 	}
 
 	var auth ContainerRegistryAuth
-	if err := c.Post(ctx, "/containerregistryauth", req, &auth); err != nil {
+	if err := c.Post(ctx, "/registries", req, &auth); err != nil {
 		return nil, fmt.Errorf("failed to create container registry auth: %w", err)
+	}
+	if err := validateResourceIdentity("registry", auth.ID, auth.Name, ""); err != nil {
+		return nil, err
+	}
+	if auth.Name != req.Name {
+		return nil, fmt.Errorf("created registry name disagrees with request")
+	}
+	return &auth, nil
+}
+
+// GetContainerRegistryAuth reads a stored credential's metadata by ID.
+// Usernames and passwords are write-only and are not returned.
+func (c *Client) GetContainerRegistryAuth(ctx context.Context, authID string) (*ContainerRegistryAuth, error) {
+	if err := validateResourceID("authID", authID); err != nil {
+		return nil, err
+	}
+	var auth ContainerRegistryAuth
+	if err := c.Get(ctx, "/registries/"+url.PathEscape(authID), &auth); err != nil {
+		return nil, fmt.Errorf("get registry: %w", err)
+	}
+	if err := validateResourceIdentity("registry", auth.ID, auth.Name, authID); err != nil {
+		return nil, err
 	}
 	return &auth, nil
 }
 
 // DeleteContainerRegistryAuth deletes a stored registry credential by ID.
 func (c *Client) DeleteContainerRegistryAuth(ctx context.Context, authID string) error {
-	if err := c.validateRequired("authID", authID); err != nil {
+	if err := validateResourceID("authID", authID); err != nil {
 		return err
 	}
-	if err := c.Delete(ctx, "/containerregistryauth/"+authID); err != nil {
+	if err := c.Delete(ctx, "/registries/"+url.PathEscape(authID)); err != nil {
 		return fmt.Errorf("failed to delete container registry auth %s: %w", authID, err)
 	}
 	return nil
 }
 
 // registryAuthMessages are substrings that indicate a pod-create failure was
-// caused by a bad/stale containerRegistryAuthId or an unpullable private
+// caused by a bad/stale registry credential or an unpullable private
 // image. RunPod does not surface structured error codes for these, so fuzzy
 // matching is the only available signal.
 var registryAuthMessages = []string{

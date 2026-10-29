@@ -1,3 +1,5 @@
+> Historical design note, superseded by the REST-only v2 readback implemented on 2026-10-28. See [the current migration contract](rest-v2-migration-20261028.md).
+
 # Readback absence authority
 
 Owner: /root/evolution_tolerance_audit

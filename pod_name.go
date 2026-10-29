@@ -21,7 +21,7 @@ func (c *Client) RenamePod(ctx context.Context, podID, name string) error {
 		ID   string `json:"id"`
 		Name string `json:"name"`
 	}
-	endpoint := strings.TrimRight(c.restV2BaseURL, "/") + "/pods/" + url.PathEscape(podID)
+	endpoint := strings.TrimRight(c.baseURL, "/") + "/pods/" + url.PathEscape(podID)
 	if err := c.Patch(ctx, endpoint, map[string]string{"name": name}, &renamed); err != nil {
 		return err
 	}

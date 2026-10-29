@@ -2,8 +2,10 @@ package runpod
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"math"
+	"math/big"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -11,20 +13,13 @@ import (
 
 var cpuInstanceIDPattern = regexp.MustCompile(`^(cpu[0-9]+[cgm])-([1-9][0-9]*)-([1-9][0-9]*)$`)
 
-// CPUStockStatusUnknown means RunPod returned an exact secure price but
-// omitted stockStatus. Callers may attempt a create; that create remains the
-// capacity authority.
-const CPUStockStatusUnknown = "Unknown"
-
-// CPUOfferRequest identifies one exact RunPod CPU instance shape in one data center.
-// InstanceID uses RunPod's family-vCPU-RAM spelling, for example cpu5c-2-4.
 type CPUOfferRequest struct {
 	InstanceID   string
 	DataCenterID string
 }
 
-// CPUOffer is provider-authoritative stock and on-demand Pod pricing for one
-// exact family, instance shape, and data center.
+// CPUOffer prices one exact shape using a catalog per-vCPU rate. REST v2 does
+// not expose the old host-specific disk ceiling.
 type CPUOffer struct {
 	CPUFamilyID                   string
 	CPUInstanceID                 string
@@ -34,123 +29,101 @@ type CPUOffer struct {
 	MemoryInGB                    int
 	StockStatus                   string
 	OnDemandPriceUSDMicrosPerHour USDMicrosPerHour
-	// MaxContainerDiskGB is the provider limit for this exact vCPU shape.
-	MaxContainerDiskGB int
+	PriceSource                   string
+}
+type CPUVCPURange struct {
+	Min int `json:"min"`
+	Max int `json:"max"`
+}
+type CPUPrices struct {
+	SecurePerVCPU     *USDMicrosPerHour `json:"securePerVcpu"`
+	ServerlessPerVCPU *USDMicrosPerHour `json:"serverlessPerVcpu"`
+}
+type CPUType struct {
+	ID           string                          `json:"id"`
+	Name         string                          `json:"name"`
+	Group        string                          `json:"group"`
+	VCPU         CPUVCPURange                    `json:"vcpu"`
+	RAMGBPerVCPU json.Number                     `json:"ramGbPerVcpu"`
+	Price        CPUPrices                       `json:"price"`
+	Availability string                          `json:"availability,omitempty"`
+	DataCenters  []CatalogDataCenterAvailability `json:"dataCenters,omitempty"`
 }
 
-type graphQLCPUOfferPayload struct {
-	CPUFlavors []struct {
-		ID               string  `json:"id"`
-		DisplayName      string  `json:"displayName"`
-		MinVCPU          float64 `json:"minVcpu"`
-		MaxVCPU          int     `json:"maxVcpu"`
-		RAMMultiplier    float64 `json:"ramMultiplier"`
-		DiskLimitPerVCPU float64 `json:"diskLimitPerVcpu"`
-		Specifics        *struct {
-			StockStatus string            `json:"stockStatus"`
-			SecurePrice *USDMicrosPerHour `json:"securePrice"`
-		} `json:"specifics"`
-	} `json:"cpuFlavors"`
-}
-
-// GetCPUOffer asks RunPod's cpuFlavors.specifics surface for one exact
-// family/instance/data-center quote. The provider's USD decimal is decoded
-// directly to integer micros; sub-micro and overflowing rates refuse.
-func (c *Client) GetCPUOffer(ctx context.Context, request CPUOfferRequest) (CPUOffer, error) {
-	var out CPUOffer
-	if err := validateCPUOfferRequest(request); err != nil {
-		return out, err
+func validateCPUOfferRequest(r CPUOfferRequest) error {
+	m := cpuInstanceIDPattern.FindStringSubmatch(r.InstanceID)
+	if m == nil {
+		return NewValidationError("instanceId", "must use family-vCPU-RAM format")
 	}
-	instanceID, dataCenterID := strings.TrimSpace(request.InstanceID), strings.TrimSpace(request.DataCenterID)
-	query := `
-query($instanceId: String!, $dataCenterId: String!) {
-  cpuFlavors {
-    id
-    displayName
-    minVcpu
-    maxVcpu
-    ramMultiplier
-    diskLimitPerVcpu
-    specifics(input: { instanceId: $instanceId, dataCenterId: $dataCenterId }) {
-      stockStatus
-      securePrice
-    }
-  }
-}`
-	var payload graphQLCPUOfferPayload
-	if err := c.GraphQL(ctx, query, map[string]interface{}{
-		"instanceId": instanceID, "dataCenterId": dataCenterID,
-	}, &payload); err != nil {
-		return out, fmt.Errorf("failed to quote CPU offer: %w", err)
+	count, err := strconv.Atoi(m[2])
+	if err != nil || count < 2 || count&(count-1) != 0 {
+		return NewValidationError("vcpuCount", "must be a power of two of at least two")
 	}
-
-	return decodeCPUOffer(payload, request)
-}
-
-func decodeCPUOffer(payload graphQLCPUOfferPayload, request CPUOfferRequest) (CPUOffer, error) {
-	var out CPUOffer
-	if err := validateCPUOfferRequest(request); err != nil {
-		return out, err
+	if _, err := strconv.Atoi(m[3]); err != nil {
+		return NewValidationError("instanceId", "memory overflows")
 	}
-	instanceID, dataCenterID := strings.TrimSpace(request.InstanceID), strings.TrimSpace(request.DataCenterID)
-	match := cpuInstanceIDPattern.FindStringSubmatch(instanceID)
-	familyID := match[1]
-	vcpu, _ := strconv.Atoi(match[2])
-	memory, _ := strconv.Atoi(match[3])
-
-	matches := 0
-	for _, flavor := range payload.CPUFlavors {
-		if strings.TrimSpace(flavor.ID) != familyID {
-			continue
-		}
-		matches++
-		if flavor.Specifics == nil || flavor.Specifics.SecurePrice == nil {
-			return out, fmt.Errorf("RunPod CPU offer %s in %s has no exact secure Pod price", instanceID, dataCenterID)
-		}
-		stock := strings.TrimSpace(flavor.Specifics.StockStatus)
-		if stock == "" {
-			stock = CPUStockStatusUnknown
-		}
-		if (flavor.MinVCPU > 0 && float64(vcpu) < flavor.MinVCPU) ||
-			(flavor.MaxVCPU > 0 && vcpu > flavor.MaxVCPU) {
-			return out, fmt.Errorf("RunPod CPU flavor %s does not admit %d vCPU", familyID, vcpu)
-		}
-		if flavor.RAMMultiplier > 0 && float64(memory) != float64(vcpu)*flavor.RAMMultiplier {
-			return out, fmt.Errorf("RunPod CPU instance %s disagrees with flavor RAM multiplier", instanceID)
-		}
-		maxDisk := math.Floor(flavor.DiskLimitPerVCPU * float64(vcpu))
-		// Missing/null fields decode to zero. Check the exclusive integer bound
-		// before conversion: float64(MaxInt) rounds up on 64-bit platforms.
-		if flavor.DiskLimitPerVCPU <= 0 || math.IsNaN(maxDisk) || math.IsInf(maxDisk, 0) ||
-			maxDisk < 1 || maxDisk >= math.Ldexp(1, strconv.IntSize-1) {
-			return out, fmt.Errorf("RunPod CPU flavor %s has no valid container disk limit for %d vCPU", familyID, vcpu)
-		}
-		out = CPUOffer{
-			CPUFamilyID: familyID, CPUInstanceID: instanceID, DataCenterID: dataCenterID,
-			DisplayName: strings.TrimSpace(flavor.DisplayName), VCPUCount: vcpu, MemoryInGB: memory,
-			MaxContainerDiskGB: int(maxDisk),
-			StockStatus:        stock, OnDemandPriceUSDMicrosPerHour: *flavor.Specifics.SecurePrice,
-		}
-	}
-	if matches != 1 {
-		return CPUOffer{}, fmt.Errorf("RunPod returned %d CPU flavor rows for %s", matches, familyID)
-	}
-	return out, nil
-}
-
-func validateCPUOfferRequest(request CPUOfferRequest) error {
-	instanceID := strings.TrimSpace(request.InstanceID)
-	dataCenterID := strings.TrimSpace(request.DataCenterID)
-	match := cpuInstanceIDPattern.FindStringSubmatch(instanceID)
-	if len(match) != 4 {
-		return NewValidationError("instanceId", "must use the family-vCPU-RAM spelling, for example cpu5c-2-4")
-	}
-	familyID := match[1]
-	if _, ok := CPUFamilyByID(familyID); !ok {
-		return NewValidationErrorWithValue("instanceId", "names an unknown CPU family", instanceID)
-	}
-	if dataCenterID == "" {
-		return NewValidationError("dataCenterId", "cannot be empty")
+	if r.DataCenterID == "" || r.DataCenterID != strings.TrimSpace(r.DataCenterID) {
+		return NewValidationError("dataCenterId", "must be an exact non-empty id")
 	}
 	return nil
+}
+func (c *Client) getCPUOffer(ctx context.Context, r CPUOfferRequest, read catalogReader) (CPUOffer, error) {
+	var out CPUOffer
+	if err := validateCPUOfferRequest(r); err != nil {
+		return out, err
+	}
+	m := cpuInstanceIDPattern.FindStringSubmatch(r.InstanceID)
+	count, _ := strconv.Atoi(m[2])
+	memory, _ := strconv.Atoi(m[3])
+	family := m[1]
+	q := url.Values{"include": {"AVAILABILITY"}, "product": {"POD"}, "vcpuCount": {strconv.Itoa(count)}}
+	var flavor CPUType
+	if err := read(ctx, "/catalog/cpus/"+url.PathEscape(family)+"?"+q.Encode(), &flavor); err != nil {
+		return out, err
+	}
+	if flavor.ID != family || flavor.Name == "" {
+		return out, fmt.Errorf("RunPod returned incomplete or foreign CPU flavor %q", flavor.ID)
+	}
+	if flavor.VCPU.Min <= 0 || flavor.VCPU.Max < flavor.VCPU.Min || count < flavor.VCPU.Min || count > flavor.VCPU.Max {
+		return out, fmt.Errorf("RunPod CPU flavor %s does not admit %d vCPU", family, count)
+	}
+	ratio, ok := new(big.Rat).SetString(flavor.RAMGBPerVCPU.String())
+	if !ok || ratio.Sign() <= 0 {
+		return out, fmt.Errorf("RunPod omitted or malformed RAM ratio for CPU flavor %s", family)
+	}
+	expected := new(big.Rat).Mul(ratio, big.NewRat(int64(count), 1))
+	if expected.Cmp(big.NewRat(int64(memory), 1)) != 0 {
+		return out, fmt.Errorf("RunPod CPU instance %s disagrees with flavor RAM ratio", r.InstanceID)
+	}
+	if err := validateCatalogAvailability(flavor.Availability); err != nil {
+		return out, err
+	}
+	if flavor.Price.SecurePerVCPU == nil {
+		return out, fmt.Errorf("RunPod CPU flavor %s has no secure catalog price", family)
+	}
+	stock := "NONE"
+	seen := map[string]bool{}
+	for _, dc := range flavor.DataCenters {
+		if dc.ID == "" || dc.Name == "" || seen[dc.ID] {
+			return out, fmt.Errorf("RunPod returned incomplete or duplicate CPU datacenter")
+		}
+		seen[dc.ID] = true
+		if err := validateCatalogAvailability(dc.Availability); err != nil {
+			return out, err
+		}
+		if dc.ID == r.DataCenterID {
+			stock = dc.Availability
+		}
+	}
+	if len(flavor.DataCenters) == 0 && flavor.Availability != "NONE" {
+		return out, fmt.Errorf("RunPod omitted datacenters for available CPU flavor %s", family)
+	}
+	rate, err := checkedCatalogRate(*flavor.Price.SecurePerVCPU, count)
+	if err != nil {
+		return out, err
+	}
+	return CPUOffer{CPUFamilyID: family, CPUInstanceID: r.InstanceID, DataCenterID: r.DataCenterID, DisplayName: flavor.Name, VCPUCount: count, MemoryInGB: memory, StockStatus: stock, OnDemandPriceUSDMicrosPerHour: rate, PriceSource: CatalogListPrice}, nil
+}
+func (c *Client) GetCPUOffer(ctx context.Context, r CPUOfferRequest) (CPUOffer, error) {
+	return c.getCPUOffer(ctx, r, c.Get)
 }

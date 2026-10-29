@@ -7,14 +7,11 @@ import (
 	"os"
 	"testing"
 	"time"
-
-	"github.com/joho/godotenv"
 )
 
 // loadEnv gates live tests on credentials being present: a plain
 // `go test ./...` without RUNPOD_API_KEY skips them instead of failing.
 func loadEnv(t *testing.T) (string, string) {
-	_ = godotenv.Load()
 	apiKey := os.Getenv("RUNPOD_API_KEY")
 	endpointID := os.Getenv("RUNPOD_ENDPOINT_ID")
 	if apiKey == "" || endpointID == "" {
@@ -23,7 +20,17 @@ func loadEnv(t *testing.T) (string, string) {
 	return apiKey, endpointID
 }
 
+// requireLiveJobMutation keeps live test discovery read-only unless creating
+// inference work and mutating its queue has been explicitly enabled.
+func requireLiveJobMutation(t *testing.T) {
+	t.Helper()
+	if os.Getenv("RUNPOD_LIVE_CREATE") != "1" {
+		t.Skip("live job mutation: RUNPOD_LIVE_CREATE=1 required")
+	}
+}
+
 func TestRunSyncLive(t *testing.T) {
+	requireLiveJobMutation(t)
 	apiKey, endpointID := loadEnv(t)
 	client := mustClient(t, apiKey)
 	ctx := context.Background()
@@ -38,6 +45,7 @@ func TestRunSyncLive(t *testing.T) {
 }
 
 func TestRunAsyncStatusCancelRetryLive(t *testing.T) {
+	requireLiveJobMutation(t)
 	apiKey, endpointID := loadEnv(t)
 	client := mustClient(t, apiKey)
 	ctx := context.Background()
@@ -88,6 +96,7 @@ func TestGetHealthLive(t *testing.T) {
 }
 
 func TestStreamAndWaitForJobCompletion(t *testing.T) {
+	requireLiveJobMutation(t)
 	apiKey, endpointID := loadEnv(t)
 	client := mustClient(t, apiKey)
 	ctx := context.Background()
@@ -108,6 +117,7 @@ func TestStreamAndWaitForJobCompletion(t *testing.T) {
 }
 
 func TestSubmitAndPurgeLive(t *testing.T) {
+	requireLiveJobMutation(t)
 	apiKey, endpointID := loadEnv(t)
 	client := mustClient(t, apiKey)
 	ctx := context.Background()

@@ -2,7 +2,9 @@ package runpod_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,216 +15,299 @@ import (
 	runpod "github.com/cozy-creator/runpod-go-sdk"
 )
 
-func TestGetPodBillingHistorySendsNormalizedExactQueryAndReturnsEvidence(t *testing.T) {
-	const podID = "pod-one"
-	const response = "[\n" +
-		`  {"amount":1.250001,"diskSpaceBilledGb":50,"podId":"pod-one","time":"2026-08-25T10:00:00+00:00","timeBilledMs":3600000},` + "\n" +
-		`  {"amount":"-0.000001","gpuTypeId":"NVIDIA H200","podId":"pod-one","time":"2026-08-25T11:00:00Z","timeBilledMs":1}` + "\n" +
-		"]\n"
-	start := time.Date(2026, 8, 25, 10, 0, 0, 123_000_000, time.UTC)
-	end := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
-	wantValues := url.Values{
-		"bucketSize": {"hour"},
-		"endTime":    {end.Format(time.RFC3339Nano)},
-		"grouping":   {"podId"},
-		"podId":      {podID},
-		"startTime":  {start.Format(time.RFC3339Nano)},
-	}
+const v2BillingRecord = `{"podId":"pod-one","startTime":"2026-10-28T10:00:00Z","endTime":"2026-10-28T11:00:00Z","totalAmount":0.25,"gpuAmount":0.2,"cpuAmount":0,"diskAmount":0.05}`
+const v2BillingMetadata = `{"query":{"podId":"pod-one","startTime":"2026-10-28T10:00:00Z","endTime":"2026-10-28T12:00:00Z","bucketSize":"hour"},"recordCount":1,"uniquePodCount":1,"totals":{"totalAmount":0.25,"gpuAmount":0.2,"cpuAmount":0,"diskAmount":0.05}}`
+const v2BillingResponse = `{"records":[` + v2BillingRecord + `],"metadata":` + v2BillingMetadata + `}`
 
+func billingTestBounds() (time.Time, time.Time) {
+	return time.Date(2026, 10, 28, 10, 15, 0, 123456789, time.UTC), time.Date(2026, 10, 28, 11, 30, 0, 0, time.UTC)
+}
+
+func billingClient(t *testing.T, body string) *runpod.Client {
+	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/billing/pods" {
-			t.Errorf("request = %s %s; want GET /billing/pods", r.Method, r.URL.Path)
+		if r.Method != http.MethodGet || r.URL.Path != "/v2/billing/pods" {
+			t.Errorf("request %s %s", r.Method, r.URL)
 		}
-		if r.URL.RawQuery != wantValues.Encode() {
-			t.Errorf("raw query = %q; want %q", r.URL.RawQuery, wantValues.Encode())
+		fmt.Fprint(w, body)
+	}))
+	t.Cleanup(server.Close)
+	return mustClient(t, "key", runpod.WithBaseURL(server.URL+"/v2"), runpod.WithMaxRetryAttempts(0))
+}
+
+func billingMutation(t *testing.T, edit func(map[string]any)) string {
+	t.Helper()
+	decoder := json.NewDecoder(strings.NewReader(v2BillingResponse))
+	decoder.UseNumber()
+	var value map[string]any
+	if err := decoder.Decode(&value); err != nil {
+		t.Fatal(err)
+	}
+	edit(value)
+	body, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
+func billingRecord(value map[string]any) map[string]any {
+	return value["records"].([]any)[0].(map[string]any)
+}
+func billingMetadata(value map[string]any) map[string]any { return value["metadata"].(map[string]any) }
+
+func TestV2BillingSendsExactQueryAndPreservesResolvedWindowAndSignedAmounts(t *testing.T) {
+	// The provider's independently rounded aggregate can legitimately differ
+	// from the sum of rounded records. Preserve both, along with the exact body.
+	const response = `{
+ "records":[
+  {"podId":"pod-one","startTime":"2026-10-28T10:00:00Z","endTime":"2026-10-28T11:00:00Z","totalAmount":6.072548240656033,"gpuAmount":6,"cpuAmount":0,"diskAmount":0.072548240656033},
+  {"podId":"pod-one","startTime":"2026-10-28T11:00:00Z","endTime":"2026-10-28T12:00:00Z","totalAmount":-0.0000015,"gpuAmount":0,"cpuAmount":0,"diskAmount":-0.0000015}
+ ],
+ "metadata":{"query":{"podId":"pod-one","startTime":"2026-10-28T10:00:00Z","endTime":"2026-10-28T12:00:00Z","bucketSize":"hour"},"recordCount":2,"uniquePodCount":1,"totals":{"totalAmount":6.072546740656033,"gpuAmount":6,"cpuAmount":0,"diskAmount":0.072546740656033}}
+}`
+	start, end := billingTestBounds()
+	wantQuery := url.Values{"podId": {"pod-one"}, "startTime": {start.Format(time.RFC3339Nano)}, "endTime": {end.Format(time.RFC3339Nano)}, "bucketSize": {"hour"}}.Encode()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/billing/pods" || r.URL.RawQuery != wantQuery {
+			t.Errorf("query %s", r.URL)
 		}
-		if got := r.Header.Get("Authorization"); got != "Bearer test_key" {
-			t.Errorf("Authorization = %q", got)
+		if r.URL.Query().Has("grouping") {
+			t.Error("sent removed grouping parameter")
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(response))
+		if r.Header.Get("Authorization") != "Bearer key" {
+			t.Error("missing bearer auth")
+		}
+		fmt.Fprint(w, response)
 	}))
 	defer server.Close()
-
-	client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL), runpod.WithMaxRetryAttempts(0))
-	got, err := client.GetPodBillingHistory(context.Background(), podID, start, end)
+	client := mustClient(t, "key", runpod.WithBaseURL(server.URL+"/v2"))
+	history, err := client.GetPodBillingHistory(t.Context(), "pod-one", start, end)
 	if err != nil {
-		t.Fatalf("GetPodBillingHistory: %v", err)
+		t.Fatal(err)
 	}
-	if got.NormalizedQuery != wantValues.Encode() {
-		t.Errorf("NormalizedQuery = %q; want %q", got.NormalizedQuery, wantValues.Encode())
+	if history.NormalizedQuery != wantQuery || string(history.RawResponse) != response {
+		t.Fatal("changed exact request or response evidence")
 	}
-	if string(got.RawResponse) != response {
-		t.Errorf("RawResponse changed:\n got %q\nwant %q", got.RawResponse, response)
+	if !history.Query.StartTime.Equal(start.Truncate(time.Hour)) || !history.Query.EndTime.Equal(end.Truncate(time.Hour).Add(time.Hour)) || history.Query.PodID != "pod-one" || history.Query.BucketSize != "hour" {
+		t.Fatalf("provider resolved query %+v", history.Query)
 	}
-	if got.TotalAmountUSDMicros != 1_250_000 {
-		t.Errorf("TotalAmountUSDMicros = %d; want 1250000", got.TotalAmountUSDMicros)
+	if len(history.Records) != 2 || history.TotalAmountUSDMicros != 6072546 || history.MetadataTotalAmountUSDMicros != 6072547 {
+		t.Fatalf("rounded totals %+v", history)
 	}
-	if len(got.Records) != 2 {
-		t.Fatalf("len(Records) = %d; want 2", len(got.Records))
+	if history.Records[0].GPUAmountUSDMicros != 6000000 || history.Records[0].DiskAmountUSDMicros != 72548 || history.Records[1].DiskAmountUSDMicros != -2 || history.Records[1].AmountUSDMicros != -2 {
+		t.Fatalf("amounts %+v", history.Records)
 	}
-	wantTimes := []time.Time{
-		time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC),
-		time.Date(2026, 8, 25, 11, 0, 0, 0, time.UTC),
-	}
-	wantAmounts := []int64{1_250_001, -1}
-	wantBilled := []int64{3_600_000, 1}
-	for i, record := range got.Records {
-		if record.PodID != podID || !record.BucketStart.Equal(wantTimes[i]) ||
-			record.AmountUSDMicros != wantAmounts[i] || record.TimeBilledMs != wantBilled[i] {
-			t.Errorf("record %d = %+v", i, record)
-		}
+	if history.Records[0].BucketEnd.Sub(history.Records[0].BucketStart) != time.Hour {
+		t.Fatalf("bucket range %+v", history.Records[0])
 	}
 }
 
-// The body is RunPod's verbatim answer for pod 3hnjdqs4ylflk7 (2026-09-28):
-// zoneless UTC bucket times and float-computed sub-micro amounts.
-func TestGetPodBillingHistoryAcceptsRunPodWireShape(t *testing.T) {
-	const response = `[{"amount":6.072548240656033,"timeBilledMs":2601516,"diskSpaceBilledGB":2700,"podId":"3hnjdqs4ylflk7","time":"2026-09-28 09:00:00"},{"amount":8.409179071895778,"timeBilledMs":3603235,"diskSpaceBilledGB":3600,"podId":"3hnjdqs4ylflk7","time":"2026-09-28 10:00:00"},{"amount":1.6644677189178765,"timeBilledMs":713766,"diskSpaceBilledGB":900,"podId":"3hnjdqs4ylflk7","time":"2026-09-28 11:00:00"}]`
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(response))
-	}))
-	defer server.Close()
-
-	client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL), runpod.WithMaxRetryAttempts(0))
-	start := time.Date(2026, 9, 28, 9, 0, 0, 0, time.UTC)
-	got, err := client.GetPodBillingHistory(context.Background(), "3hnjdqs4ylflk7", start, start.Add(4*time.Hour))
-	if err != nil {
-		t.Fatalf("GetPodBillingHistory: %v", err)
-	}
-	want := []runpod.PodBillingRecord{
-		{PodID: "3hnjdqs4ylflk7", BucketStart: start, AmountUSDMicros: 6_072_548, TimeBilledMs: 2_601_516},
-		{PodID: "3hnjdqs4ylflk7", BucketStart: start.Add(time.Hour), AmountUSDMicros: 8_409_179, TimeBilledMs: 3_603_235},
-		{PodID: "3hnjdqs4ylflk7", BucketStart: start.Add(2 * time.Hour), AmountUSDMicros: 1_664_468, TimeBilledMs: 713_766},
-	}
-	if len(got.Records) != len(want) {
-		t.Fatalf("records = %+v", got.Records)
-	}
-	for i := range want {
-		if got.Records[i] != want[i] {
-			t.Errorf("record %d = %+v; want %+v", i, got.Records[i], want[i])
-		}
-	}
-	if got.TotalAmountUSDMicros != 16_146_195 {
-		t.Errorf("TotalAmountUSDMicros = %d; want 16146195", got.TotalAmountUSDMicros)
+func TestV2BillingPreservesEmptyZeroCostEvidence(t *testing.T) {
+	body := billingMutation(t, func(value map[string]any) {
+		value["records"] = []any{}
+		metadata := billingMetadata(value)
+		metadata["recordCount"] = 0
+		metadata["uniquePodCount"] = 0
+		metadata["totals"] = map[string]any{"totalAmount": 0, "gpuAmount": 0, "cpuAmount": 0, "diskAmount": 0}
+	})
+	client := billingClient(t, body)
+	start, end := billingTestBounds()
+	result, err := client.GetPodBillingHistory(t.Context(), "pod-one", start, end)
+	if err != nil || result.Records == nil || len(result.Records) != 0 || result.TotalAmountUSDMicros != 0 || result.MetadataTotalAmountUSDMicros != 0 || string(result.RawResponse) != body {
+		t.Fatalf("zero evidence %+v %v", result, err)
 	}
 }
 
-func TestGetPodBillingHistoryPreservesEmptyZeroCostEvidence(t *testing.T) {
-	const response = " [ ]\n"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(response))
-	}))
-	defer server.Close()
-
-	client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL), runpod.WithMaxRetryAttempts(0))
-	start := time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)
-	got, err := client.GetPodBillingHistory(context.Background(), "pod-one", start, start.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("GetPodBillingHistory: %v", err)
-	}
-	if string(got.RawResponse) != response || got.TotalAmountUSDMicros != 0 || len(got.Records) != 0 {
-		t.Fatalf("zero-cost evidence = %+v raw=%q", got, got.RawResponse)
-	}
-}
-
-func TestGetPodBillingHistoryValidatesExactPodAndUTCBoundsBeforeHTTP(t *testing.T) {
-	httpCalls := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		httpCalls++
-		http.Error(w, "unexpected request", http.StatusInternalServerError)
-	}))
-	defer server.Close()
-	client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL), runpod.WithMaxRetryAttempts(0))
-	start := time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)
-	end := start.Add(time.Hour)
-
-	tests := []struct {
-		name       string
-		podID      string
-		start, end time.Time
+func TestV2BillingRejectsIncompleteForeignAndMalformedEvidence(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(map[string]any)
 	}{
-		{name: "empty pod", podID: "", start: start, end: end},
-		{name: "normalized pod would differ", podID: " pod-one ", start: start, end: end},
-		{name: "zero start", podID: "pod-one", start: time.Time{}, end: end},
-		{name: "non UTC start", podID: "pod-one", start: start.In(time.FixedZone("west", -7*60*60)), end: end},
-		{name: "non UTC end", podID: "pod-one", start: start, end: end.In(time.FixedZone("east", 2*60*60))},
-		{name: "equal bounds", podID: "pod-one", start: start, end: start},
-		{name: "reversed bounds", podID: "pod-one", start: end, end: start},
+		{"missing records", func(v map[string]any) { delete(v, "records") }},
+		{"null records", func(v map[string]any) { v["records"] = nil }},
+		{"missing metadata", func(v map[string]any) { delete(v, "metadata") }},
+		{"null metadata", func(v map[string]any) { v["metadata"] = nil }},
+		{"missing query", func(v map[string]any) { delete(billingMetadata(v), "query") }},
+		{"null query", func(v map[string]any) { billingMetadata(v)["query"] = nil }},
+		{"missing totals", func(v map[string]any) { delete(billingMetadata(v), "totals") }},
+		{"null totals", func(v map[string]any) { billingMetadata(v)["totals"] = nil }},
+		{"missing count", func(v map[string]any) { delete(billingMetadata(v), "recordCount") }},
+		{"null count", func(v map[string]any) { billingMetadata(v)["recordCount"] = nil }},
+		{"wrong count", func(v map[string]any) { billingMetadata(v)["recordCount"] = 2 }},
+		{"wrong unique count", func(v map[string]any) { billingMetadata(v)["uniquePodCount"] = 0 }},
+		{"missing pod", func(v map[string]any) { delete(billingRecord(v), "podId") }},
+		{"null pod", func(v map[string]any) { billingRecord(v)["podId"] = nil }},
+		{"foreign pod", func(v map[string]any) { billingRecord(v)["podId"] = "other" }},
+		{"missing bucket start", func(v map[string]any) { delete(billingRecord(v), "startTime") }},
+		{"null bucket end", func(v map[string]any) { billingRecord(v)["endTime"] = nil }},
+		{"invalid bucket time", func(v map[string]any) { billingRecord(v)["startTime"] = "2026-10-28 10:00:00" }},
+		{"outside resolved window", func(v map[string]any) { billingRecord(v)["startTime"] = "2026-10-28T09:00:00Z" }},
+		{"inverted bucket", func(v map[string]any) { billingRecord(v)["endTime"] = "2026-10-28T09:00:00Z" }},
+		{"nonhour bucket", func(v map[string]any) { billingRecord(v)["endTime"] = "2026-10-28T10:30:00Z" }},
+		{"unaligned bucket", func(v map[string]any) {
+			billingRecord(v)["startTime"] = "2026-10-28T10:15:00Z"
+			billingRecord(v)["endTime"] = "2026-10-28T11:15:00Z"
+		}},
+		{"duplicate bucket", func(v map[string]any) {
+			v["records"] = append(v["records"].([]any), billingRecord(v))
+			billingMetadata(v)["recordCount"] = 2
+		}},
+		{"foreign query", func(v map[string]any) { billingMetadata(v)["query"].(map[string]any)["podId"] = "other" }},
+		{"wrong granularity", func(v map[string]any) { billingMetadata(v)["query"].(map[string]any)["bucketSize"] = "day" }},
+		{"wrong resolved start", func(v map[string]any) {
+			billingMetadata(v)["query"].(map[string]any)["startTime"] = "2026-10-28T09:00:00Z"
+		}},
+		{"wrong resolved end", func(v map[string]any) {
+			billingMetadata(v)["query"].(map[string]any)["endTime"] = "2026-10-28T13:00:00Z"
+		}},
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got, err := client.GetPodBillingHistory(context.Background(), test.podID, test.start, test.end); err == nil || got != nil {
-				t.Fatalf("GetPodBillingHistory = %+v, %v; want nil, error", got, err)
+	for _, field := range []string{"totalAmount", "gpuAmount", "cpuAmount", "diskAmount"} {
+		field := field
+		cases = append(cases, struct {
+			name   string
+			mutate func(map[string]any)
+		}{"missing record " + field, func(v map[string]any) { delete(billingRecord(v), field) }}, struct {
+			name   string
+			mutate func(map[string]any)
+		}{"null record " + field, func(v map[string]any) { billingRecord(v)[field] = nil }}, struct {
+			name   string
+			mutate func(map[string]any)
+		}{"missing metadata " + field, func(v map[string]any) { delete(billingMetadata(v)["totals"].(map[string]any), field) }})
+	}
+	start, end := billingTestBounds()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := billingMutation(t, tc.mutate)
+			result, err := billingClient(t, body).GetPodBillingHistory(t.Context(), "pod-one", start, end)
+			var evidence *runpod.PodBillingEvidenceError
+			if result != nil || !errors.As(err, &evidence) || evidence.Kind != runpod.PodBillingEvidenceSchemaAmbiguity {
+				t.Fatalf("classification %+v %v", result, err)
+			}
+			if string(evidence.RawResponse) != body || evidence.NormalizedQuery == "" {
+				t.Fatalf("lost refusal evidence %+v", evidence)
 			}
 		})
 	}
-	if httpCalls != 0 {
-		t.Fatalf("HTTP calls = %d; want 0", httpCalls)
+	for _, body := range []string{`null`, `[]`, `{`, `{"records":[{"amount":1,"time":"2026-10-28 10:00:00"}]}`} {
+		if _, err := billingClient(t, body).GetPodBillingHistory(t.Context(), "pod-one", start, end); err == nil {
+			t.Fatalf("accepted obsolete or malformed shape %s", body)
+		}
 	}
 }
 
-func TestGetPodBillingHistoryRefusesAmbiguousEvidence(t *testing.T) {
-	const podID = "pod-one"
-	start := time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)
-	wantQuery := url.Values{
-		"bucketSize": {"hour"},
-		"endTime":    {start.Add(time.Hour).Format(time.RFC3339Nano)},
-		"grouping":   {"podId"},
-		"podId":      {podID},
-		"startTime":  {start.Format(time.RFC3339Nano)},
-	}.Encode()
-	tests := []struct {
-		name     string
-		body     string
-		want     string
-		wantKind string
+func TestV2BillingOverflowRetainsStableRefusalKind(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(map[string]any)
 	}{
-		{name: "top level null", body: `null`, want: "JSON array", wantKind: "schema_ambiguity"},
-		{name: "missing amount", body: `[ {"podId":"pod-one","time":"2026-08-25T10:00:00Z","timeBilledMs":1} ]`, want: "omitted amount", wantKind: "schema_ambiguity"},
-		{name: "missing pod", body: `[ {"amount":1,"time":"2026-08-25T10:00:00Z","timeBilledMs":1} ]`, want: "omitted podId", wantKind: "schema_ambiguity"},
-		{name: "missing time", body: `[ {"amount":1,"podId":"pod-one","timeBilledMs":1} ]`, want: "omitted time", wantKind: "schema_ambiguity"},
-		{name: "missing billed time", body: `[ {"amount":1,"podId":"pod-one","time":"2026-08-25T10:00:00Z"} ]`, want: "omitted timeBilledMs", wantKind: "schema_ambiguity"},
-		{name: "foreign pod", body: `[ {"amount":1,"podId":"pod-two","time":"2026-08-25T10:00:00Z","timeBilledMs":1} ]`, want: "foreign pod", wantKind: "schema_ambiguity"},
-		{name: "zoneless ISO time", body: `[ {"amount":1,"podId":"pod-one","time":"2026-08-25T10:00:00","timeBilledMs":1} ]`, want: "invalid time", wantKind: "schema_ambiguity"},
-		{name: "zoneless minute time", body: `[ {"amount":1,"podId":"pod-one","time":"2026-08-25 10:00","timeBilledMs":1} ]`, want: "invalid time", wantKind: "schema_ambiguity"},
-		{name: "amount overflow", body: `[ {"amount":"9223372036854.775808","podId":"pod-one","time":"2026-08-25T10:00:00Z","timeBilledMs":1} ]`, want: "exceeds int64", wantKind: "amount_overflow"},
-		{name: "negative billed time", body: `[ {"amount":1,"podId":"pod-one","time":"2026-08-25T10:00:00Z","timeBilledMs":-1} ]`, want: "negative timeBilledMs", wantKind: "schema_ambiguity"},
-		{name: "total overflow", body: `[{"amount":"9223372036854.775807","podId":"pod-one","time":"2026-08-25T10:00:00Z","timeBilledMs":1},{"amount":"0.000001","podId":"pod-one","time":"2026-08-25T11:00:00Z","timeBilledMs":1}]`, want: "total USD micros overflow", wantKind: "amount_overflow"},
-		{name: "total underflow", body: `[{"amount":"-9223372036854.775808","podId":"pod-one","time":"2026-08-25T10:00:00Z","timeBilledMs":1},{"amount":-0.000001,"podId":"pod-one","time":"2026-08-25T11:00:00Z","timeBilledMs":1}]`, want: "total USD micros overflow", wantKind: "amount_overflow"},
-		{name: "response too large", body: strings.Repeat(" ", (16<<20)+1), want: "response exceeds 16777216 bytes", wantKind: "response_too_large"},
+		{"positive record overflow", func(v map[string]any) { billingRecord(v)["totalAmount"] = json.Number("9223372036854.775808") }},
+		{"negative record overflow", func(v map[string]any) { billingRecord(v)["diskAmount"] = json.Number("-9223372036854.775809") }},
+		{"metadata overflow", func(v map[string]any) {
+			billingMetadata(v)["totals"].(map[string]any)["gpuAmount"] = json.Number("9223372036854.775808")
+		}},
+		{"record sum overflow", func(v map[string]any) {
+			first := billingRecord(v)
+			first["totalAmount"] = json.Number("9223372036854.775807")
+			first["gpuAmount"] = json.Number("9223372036854.775807")
+			first["diskAmount"] = 0
+			second := map[string]any{"podId": "pod-one", "startTime": "2026-10-28T11:00:00Z", "endTime": "2026-10-28T12:00:00Z", "totalAmount": json.Number("0.000001"), "gpuAmount": json.Number("0.000001"), "cpuAmount": 0, "diskAmount": 0}
+			v["records"] = append(v["records"].([]any), second)
+			billingMetadata(v)["recordCount"] = 2
+		}},
+		{"record sum underflow", func(v map[string]any) {
+			first := billingRecord(v)
+			first["totalAmount"] = json.Number("-9223372036854.775808")
+			first["gpuAmount"] = json.Number("-9223372036854.775808")
+			first["diskAmount"] = 0
+			second := map[string]any{"podId": "pod-one", "startTime": "2026-10-28T11:00:00Z", "endTime": "2026-10-28T12:00:00Z", "totalAmount": json.Number("-0.000001"), "gpuAmount": json.Number("-0.000001"), "cpuAmount": 0, "diskAmount": 0}
+			v["records"] = append(v["records"].([]any), second)
+			billingMetadata(v)["recordCount"] = 2
+		}},
 	}
+	start, end := billingTestBounds()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := billingMutation(t, tc.mutate)
+			_, err := billingClient(t, body).GetPodBillingHistory(t.Context(), "pod-one", start, end)
+			var evidence *runpod.PodBillingEvidenceError
+			if !errors.As(err, &evidence) || evidence.Kind != runpod.PodBillingEvidenceAmountOverflow || string(evidence.RawResponse) != body {
+				t.Fatalf("overflow kind/evidence %v", err)
+			}
+		})
+	}
+}
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_, _ = w.Write([]byte(test.body))
-			}))
-			defer server.Close()
-			client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL), runpod.WithMaxRetryAttempts(0))
-			got, err := client.GetPodBillingHistory(context.Background(), podID, start, start.Add(time.Hour))
-			if err == nil || got != nil {
-				t.Fatalf("GetPodBillingHistory = %+v, %v; want nil, error", got, err)
-			}
-			if !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("error = %q; want substring %q", err, test.want)
-			}
-			var evidenceErr *runpod.PodBillingEvidenceError
-			if !errors.As(err, &evidenceErr) {
-				t.Fatalf("error type = %T; want *PodBillingEvidenceError", err)
-			}
-			if string(evidenceErr.Kind) != test.wantKind {
-				t.Errorf("Kind = %q; want %q", evidenceErr.Kind, test.wantKind)
-			}
-			if evidenceErr.NormalizedQuery != wantQuery {
-				t.Errorf("NormalizedQuery = %q; want %q", evidenceErr.NormalizedQuery, wantQuery)
-			}
-			if test.wantKind == "response_too_large" {
-				if len(evidenceErr.RawResponse) != 0 {
-					t.Errorf("oversize RawResponse has %d bytes; want 0", len(evidenceErr.RawResponse))
-				}
-			} else if string(evidenceErr.RawResponse) != test.body {
-				t.Errorf("RawResponse changed: got %q want %q", evidenceErr.RawResponse, test.body)
+func TestV2BillingBoundsAndResponseLimit(t *testing.T) {
+	start, end := billingTestBounds()
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++ }))
+	defer server.Close()
+	client := mustClient(t, "key", runpod.WithBaseURL(server.URL))
+	for _, tc := range []struct {
+		pod        string
+		start, end time.Time
+	}{
+		{"", start, end}, {" pod-one ", start, end}, {"pod-one", time.Time{}, end}, {"pod-one", start, start}, {"pod-one", end, start},
+		{"pod-one", start.In(time.FixedZone("west", -7*3600)), end}, {"pod-one", start, end.In(time.FixedZone("east", 3600))},
+	} {
+		if _, err := client.GetPodBillingHistory(context.Background(), tc.pod, tc.start, tc.end); err == nil {
+			t.Fatalf("accepted invalid input %+v", tc)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("invalid inputs sent %d requests", calls)
+	}
+	body := strings.Repeat(" ", (16<<20)+1)
+	_, err := billingClient(t, body).GetPodBillingHistory(t.Context(), "pod-one", start, end)
+	var evidence *runpod.PodBillingEvidenceError
+	if !errors.As(err, &evidence) || evidence.Kind != runpod.PodBillingEvidenceResponseTooLarge || len(evidence.RawResponse) != 0 || evidence.NormalizedQuery == "" {
+		t.Fatalf("oversize response %+v %v", evidence, err)
+	}
+}
+
+func TestV2BillingAlreadyAlignedEndIsNotWidened(t *testing.T) {
+	start := time.Date(2026, 10, 28, 10, 0, 0, 0, time.UTC)
+	end := start.Add(2 * time.Hour)
+	history, err := billingClient(t, v2BillingResponse).GetPodBillingHistory(t.Context(), "pod-one", start, end)
+	if err != nil || !history.Query.EndTime.Equal(end) {
+		t.Fatalf("aligned end %+v %v", history, err)
+	}
+}
+
+func TestV2BillingRejectsContradictoryTotalsWithoutLosingEvidence(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"empty records with nonzero total", func(v map[string]any) {
+			v["records"] = []any{}
+			m := billingMetadata(v)
+			m["recordCount"] = 0
+			m["uniquePodCount"] = 0
+		}},
+		{"metadata total mismatch", func(v map[string]any) { billingMetadata(v)["totals"].(map[string]any)["totalAmount"] = 100 }},
+		{"metadata GPU mismatch", func(v map[string]any) { billingMetadata(v)["totals"].(map[string]any)["gpuAmount"] = 100 }},
+		{"metadata CPU mismatch", func(v map[string]any) { billingMetadata(v)["totals"].(map[string]any)["cpuAmount"] = 100 }},
+		{"metadata disk mismatch", func(v map[string]any) { billingMetadata(v)["totals"].(map[string]any)["diskAmount"] = 100 }},
+		{"record components mismatch", func(v map[string]any) { billingRecord(v)["gpuAmount"] = 100 }},
+		{"negative record components mismatch", func(v map[string]any) { billingRecord(v)["diskAmount"] = -100 }},
+		{"empty records with zero total but nonzero component", func(v map[string]any) {
+			v["records"] = []any{}
+			m := billingMetadata(v)
+			m["recordCount"] = 0
+			m["uniquePodCount"] = 0
+			m["totals"] = map[string]any{"totalAmount": 0, "gpuAmount": 1, "cpuAmount": 0, "diskAmount": 0}
+		}},
+	}
+	start, end := billingTestBounds()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := billingMutation(t, tc.mutate)
+			result, err := billingClient(t, body).GetPodBillingHistory(t.Context(), "pod-one", start, end)
+			var evidence *runpod.PodBillingEvidenceError
+			if result != nil || !errors.As(err, &evidence) || evidence.Kind != runpod.PodBillingEvidenceSchemaAmbiguity || string(evidence.RawResponse) != body || evidence.NormalizedQuery == "" {
+				t.Fatalf("contradictory money qualified: %+v %v", result, err)
 			}
 		})
 	}

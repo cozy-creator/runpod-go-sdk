@@ -1,260 +1,119 @@
 package runpod
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 )
 
-// GPUOffer is one purchasable combination of GPU type and cloud, with
-// current stock and pricing. When GPUOfferFilter.DataCenterID is set, the
-// quote is scoped to that exact data center.
+// CatalogListPrice identifies a catalog rate rather than an exact host quote.
+const CatalogListPrice = "catalog_list_price"
+
+// GPUOffer combines scoped catalog availability with a cloud's catalog list
+// rate. Its price is not datacenter-specific and does not certify host RAM,
+// vCPUs, disk or bandwidth. The pod's cost is its actual assigned rate.
 type GPUOffer struct {
-	GPUTypeID   string
-	DisplayName string
-	MemoryInGB  int
-	CloudType   string // "SECURE" or "COMMUNITY"
-	// GPUCount is the whole-pod count used to obtain both prices below.
-	GPUCount    int
-	StockStatus string
-	// OnDemandPriceUSDMicrosPerHour is the aggregate uninterruptible list-price
-	// rate for GPUCount GPUs.
+	GPUTypeID                     string
+	DisplayName                   string
+	MemoryInGB                    int
+	CloudType                     string
+	GPUCount                      int
+	StockStatus                   string
 	OnDemandPriceUSDMicrosPerHour USDMicrosPerHour
-	// MinimumBidPriceUSDMicrosPerHour is the optional aggregate spot-market
-	// floor for GPUCount GPUs. It is not directly executable as a per-GPU bid;
-	// use MinimumBidPerGPUUSDMicrosPerHour for a ceil-safe conversion.
-	MinimumBidPriceUSDMicrosPerHour *USDMicrosPerHour
-	// AvailableGPUCounts is the set of whole-pod GPU counts currently
-	// reported for this exact GPU type/cloud price surface.
-	AvailableGPUCounts []int
+	PriceSource                   string
 }
 
-// MinimumBidPerGPUUSDMicrosPerHour converts RunPod's aggregate floor to the
-// per-GPU rate expected by CreatePodRequest without ever bidding below it.
-func (o GPUOffer) MinimumBidPerGPUUSDMicrosPerHour() (USDMicrosPerHour, bool) {
-	if o.MinimumBidPriceUSDMicrosPerHour == nil || o.GPUCount <= 0 {
-		return 0, false
-	}
-	aggregate := int64(*o.MinimumBidPriceUSDMicrosPerHour)
-	count := int64(o.GPUCount)
-	perGPU := aggregate / count
-	if aggregate%count != 0 {
-		perGPU++
-	}
-	return USDMicrosPerHour(perGPU), true
-}
-
-// GPUOfferFilter constrains ListGPUOffers. Zero value = all offers for one
-// GPU.
+// GPUOfferFilter contains only constraints represented by REST v2 catalog
+// availability. DataCenterID selects a returned datacenter's stock locally;
+// it never changes the cloud-wide catalog price.
 type GPUOfferFilter struct {
-	// CloudType limits the quote to SECURE or COMMUNITY; empty preserves both.
-	CloudType string
-	// GPUCount prices the offer for this many GPUs per pod (default 1).
-	GPUCount int
-	// MinCudaVersion filters to machines with at least this CUDA version.
+	CloudType           string
+	GPUCount            int
 	MinCudaVersion      string
 	AllowedCudaVersions []string
-	// DataCenterID restricts lowestPrice to one exact RunPod data center.
-	// The API also accepts comma-separated IDs, but exact-placement callers
-	// should pass one.
-	DataCenterID    string
-	MinMemoryInGB   int
-	MinVCPUCount    int
-	MinDisk         int
-	TotalDisk       int
-	MinDownloadMbps int
-	MinUploadMbps   int
-	SupportPublicIP *bool
-	// IDs filters to specific GPU type IDs.
-	IDs []string
-	// InStockOnly drops offers whose stock status is unavailable.
-	InStockOnly bool
+	CountryCodes        []string
+	DataCenterID        string
+	IDs                 []string
+	InStockOnly         bool
 }
 
-type graphQLGPUOfferPayload struct {
-	GPUTypes []struct {
-		ID             string          `json:"id"`
-		DisplayName    string          `json:"displayName"`
-		MemoryInGB     int             `json:"memoryInGb"`
-		SecureCloud    bool            `json:"secureCloud"`
-		CommunityCloud bool            `json:"communityCloud"`
-		Secure         json.RawMessage `json:"secure"`
-		Community      json.RawMessage `json:"community"`
-	} `json:"gpuTypes"`
-}
-
-// offerPrice keeps one provider cloud arm with an unavailable on-demand price from
-// erasing every other purchasable offer in the snapshot. Missing price means
-// this cloud arm is not an on-demand offer; malformed or inexact money still
-// refuses the whole observation.
-func offerPrice(raw json.RawMessage) (*Price, error) {
-	raw = bytes.TrimSpace(raw)
-	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
-		return nil, nil
+func validateGPUOfferFilter(f *GPUOfferFilter) error {
+	if f == nil {
+		return nil
 	}
-	var price Price
-	if err := json.Unmarshal(raw, &price); err != nil {
-		if errors.Is(err, errOnDemandPriceUnavailable) {
-			return nil, nil
-		}
+	if f.DataCenterID != strings.TrimSpace(f.DataCenterID) {
+		return NewValidationError("dataCenterID", "must be an exact id")
+	}
+	_, err := gpuCatalogQuery(&GPUTypeFilter{IDs: f.IDs, GPUCount: f.GPUCount, CloudType: f.CloudType, MinCudaVersion: f.MinCudaVersion, AllowedCudaVersions: f.AllowedCudaVersions, CountryCodes: f.CountryCodes})
+	return err
+}
+func checkedCatalogRate(rate USDMicrosPerHour, count int) (USDMicrosPerHour, error) {
+	if count <= 0 || rate < 0 || int64(rate) > math.MaxInt64/int64(count) {
+		return 0, fmt.Errorf("catalog aggregate hourly price overflows or has invalid count")
+	}
+	return rate * USDMicrosPerHour(count), nil
+}
+func (c *Client) listGPUOffers(ctx context.Context, f *GPUOfferFilter, read catalogReader) ([]GPUOffer, error) {
+	if f == nil {
+		f = &GPUOfferFilter{}
+	}
+	if err := validateGPUOfferFilter(f); err != nil {
 		return nil, err
 	}
-	return &price, nil
-}
-
-// ListGPUOffers returns per-(GPU type x cloud) stock and pricing in one
-// call, sorted by on-demand price ascending. This is the placement-decision
-// view that connects the catalog to pod creation: pick an offer, then set
-// GPUTypeIDs/CloudType/DataCenterIDs (and an exact per-GPU bid for spot) on
-// the CreatePodRequest.
-func (c *Client) ListGPUOffers(ctx context.Context, filter *GPUOfferFilter) ([]GPUOffer, error) {
-	gpuCount := 1
-	minCUDA := ""
-	inStockOnly := false
-	idSet := map[string]struct{}{}
-	if filter != nil {
-		if err := validateGPUOfferFilter(filter); err != nil {
+	clouds := []string{f.CloudType}
+	if f.CloudType == "" {
+		clouds = []string{"SECURE", "COMMUNITY"}
+	}
+	offers := make([]GPUOffer, 0)
+	for _, cloud := range clouds {
+		gpus, err := c.listGPUTypes(ctx, &GPUTypeFilter{IDs: f.IDs, GPUCount: f.GPUCount, CloudType: cloud, MinCudaVersion: f.MinCudaVersion, AllowedCudaVersions: f.AllowedCudaVersions, CountryCodes: f.CountryCodes}, read)
+		if err != nil {
 			return nil, err
 		}
-		if filter.GPUCount > 0 {
-			gpuCount = filter.GPUCount
-		}
-		minCUDA = strings.TrimSpace(filter.MinCudaVersion)
-		inStockOnly = filter.InStockOnly
-		for _, id := range filter.IDs {
-			if id = strings.TrimSpace(id); id != "" {
-				idSet[id] = struct{}{}
+		for _, gpu := range gpus {
+			rate := gpu.Price.Secure
+			supported := gpu.Secure
+			if cloud == "COMMUNITY" {
+				rate = gpu.Price.Community
+				supported = gpu.Community
 			}
-		}
-	}
-
-	query := `
-query($gpuCount: Int!, $minCudaVersion: String, $allowedCudaVersions: [String], $dataCenterId: String, $minMemoryInGb: Int, $minVcpuCount: Int, $minDisk: Int, $totalDisk: Int, $minDownload: Int, $minUpload: Int, $supportPublicIp: Boolean) {
-  gpuTypes {
-    id
-    displayName
-    memoryInGb
-    secureCloud
-    communityCloud
-    secure: lowestPrice(input: { gpuCount: $gpuCount, minCudaVersion: $minCudaVersion, allowedCudaVersions: $allowedCudaVersions, dataCenterId: $dataCenterId, minMemoryInGb: $minMemoryInGb, minVcpuCount: $minVcpuCount, minDisk: $minDisk, totalDisk: $totalDisk, minDownload: $minDownload, minUpload: $minUpload, supportPublicIp: $supportPublicIp, secureCloud: true }) {
-      minimumBidPrice
-      uninterruptablePrice
-      stockStatus
-      availableGpuCounts
-    }
-    community: lowestPrice(input: { gpuCount: $gpuCount, minCudaVersion: $minCudaVersion, allowedCudaVersions: $allowedCudaVersions, dataCenterId: $dataCenterId, minMemoryInGb: $minMemoryInGb, minVcpuCount: $minVcpuCount, minDisk: $minDisk, totalDisk: $totalDisk, minDownload: $minDownload, minUpload: $minUpload, supportPublicIp: $supportPublicIp, secureCloud: false }) {
-      minimumBidPrice
-      uninterruptablePrice
-      stockStatus
-      availableGpuCounts
-    }
-  }
-}`
-
-	variables := map[string]interface{}{
-		"gpuCount":       gpuCount,
-		"minCudaVersion": minCUDA,
-	}
-	if filter != nil {
-		variables["allowedCudaVersions"] = filter.AllowedCudaVersions
-		variables["dataCenterId"] = strings.TrimSpace(filter.DataCenterID)
-		variables["minMemoryInGb"] = filter.MinMemoryInGB
-		variables["minVcpuCount"] = filter.MinVCPUCount
-		variables["minDisk"] = filter.MinDisk
-		variables["totalDisk"] = filter.TotalDisk
-		variables["minDownload"] = filter.MinDownloadMbps
-		variables["minUpload"] = filter.MinUploadMbps
-		variables["supportPublicIp"] = filter.SupportPublicIP
-	}
-
-	var payload graphQLGPUOfferPayload
-	if err := c.GraphQL(ctx, query, variables, &payload); err != nil {
-		return nil, fmt.Errorf("failed to list GPU offers: %w", err)
-	}
-
-	if filter == nil {
-		filter = &GPUOfferFilter{}
-	}
-	return decodeGPUOffers(payload, gpuCount, idSet, inStockOnly, *filter)
-}
-
-func decodeGPUOffers(payload graphQLGPUOfferPayload, gpuCount int, idSet map[string]struct{}, inStockOnly bool, filter GPUOfferFilter) ([]GPUOffer, error) {
-	var offers []GPUOffer
-	for _, gpu := range payload.GPUTypes {
-		if len(idSet) > 0 {
-			if _, ok := idSet[gpu.ID]; !ok {
+			if !supported || rate == nil {
 				continue
 			}
-		}
-		secure, err := offerPrice(gpu.Secure)
-		if err != nil {
-			return nil, fmt.Errorf("decode %s SECURE offer: %w", gpu.ID, err)
-		}
-		community, err := offerPrice(gpu.Community)
-		if err != nil {
-			return nil, fmt.Errorf("decode %s COMMUNITY offer: %w", gpu.ID, err)
-		}
-		add := func(cloud string, price *Price) {
-			if price == nil {
-				return
+			stock := gpu.Availability
+			if f.DataCenterID != "" {
+				stock = "NONE"
+				for _, dc := range gpu.DataCenters {
+					if dc.ID == f.DataCenterID {
+						stock = dc.Availability
+						break
+					}
+				}
+				if len(gpu.DataCenters) == 0 && gpu.Availability != "NONE" {
+					return nil, fmt.Errorf("RunPod omitted datacenters for available GPU %s", gpu.ID)
+				}
 			}
-			status := strings.TrimSpace(price.StockStatus)
-			if inStockOnly && !isAvailableStockStatus(status) {
-				return
+			if f.InStockOnly && !isAvailableStockStatus(stock) {
+				continue
 			}
-			offers = append(offers, GPUOffer{
-				GPUTypeID:                       gpu.ID,
-				DisplayName:                     gpu.DisplayName,
-				MemoryInGB:                      gpu.MemoryInGB,
-				CloudType:                       cloud,
-				GPUCount:                        gpuCount,
-				StockStatus:                     status,
-				OnDemandPriceUSDMicrosPerHour:   price.OnDemandPriceUSDMicrosPerHour,
-				MinimumBidPriceUSDMicrosPerHour: price.MinimumBidPriceUSDMicrosPerHour,
-				AvailableGPUCounts:              append([]int(nil), price.AvailableGPUCounts...),
-			})
-		}
-		if gpu.SecureCloud && (filter.CloudType == "" || filter.CloudType == "SECURE") {
-			add("SECURE", secure)
-		}
-		if gpu.CommunityCloud && (filter.CloudType == "" || filter.CloudType == "COMMUNITY") {
-			add("COMMUNITY", community)
+			count := max(1, f.GPUCount)
+			aggregate, err := checkedCatalogRate(*rate, count)
+			if err != nil {
+				return nil, err
+			}
+			offers = append(offers, GPUOffer{GPUTypeID: gpu.ID, DisplayName: gpu.Name, MemoryInGB: gpu.Memory, CloudType: cloud, GPUCount: count, StockStatus: stock, OnDemandPriceUSDMicrosPerHour: aggregate, PriceSource: CatalogListPrice})
 		}
 	}
-
 	sort.SliceStable(offers, func(i, j int) bool {
 		if offers[i].OnDemandPriceUSDMicrosPerHour == offers[j].OnDemandPriceUSDMicrosPerHour {
-			return offers[i].DisplayName < offers[j].DisplayName
+			return offers[i].GPUTypeID < offers[j].GPUTypeID
 		}
 		return offers[i].OnDemandPriceUSDMicrosPerHour < offers[j].OnDemandPriceUSDMicrosPerHour
 	})
-
 	return offers, nil
 }
-
-func validateGPUOfferFilter(filter *GPUOfferFilter) error {
-	switch {
-	case filter.GPUCount < 0:
-		return NewValidationError("gpuCount", "cannot be negative")
-	case filter.MinMemoryInGB < 0:
-		return NewValidationError("minMemoryInGb", "cannot be negative")
-	case filter.MinVCPUCount < 0:
-		return NewValidationError("minVcpuCount", "cannot be negative")
-	case filter.MinDisk < 0:
-		return NewValidationError("minDisk", "cannot be negative")
-	case filter.MinDownloadMbps < 0:
-		return NewValidationError("minDownload", "cannot be negative")
-	case filter.MinUploadMbps < 0:
-		return NewValidationError("minUpload", "cannot be negative")
-	case filter.TotalDisk < 0:
-		return NewValidationError("totalDisk", "cannot be negative")
-	}
-	if filter.CloudType != "" && filter.CloudType != "SECURE" && filter.CloudType != "COMMUNITY" {
-		return NewValidationError("cloudType", "must be SECURE or COMMUNITY")
-	}
-	return nil
+func (c *Client) ListGPUOffers(ctx context.Context, f *GPUOfferFilter) ([]GPUOffer, error) {
+	return c.listGPUOffers(ctx, f, c.Get)
 }

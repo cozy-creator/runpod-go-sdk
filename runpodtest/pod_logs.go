@@ -22,7 +22,7 @@ func (s *Server) SetPodLogs(podID string, entries []runpod.PodLogEntry) {
 }
 
 func (s *Server) handlePodLogs(w http.ResponseWriter, r *http.Request, path string) {
-	parts := strings.Split(strings.TrimPrefix(path, "/rest-v2/pods/"), "/")
+	parts := strings.Split(strings.TrimPrefix(path, "/v2/pods/"), "/")
 	if r.Method != http.MethodGet || len(parts) != 2 || parts[1] != "logs" {
 		writeErr(w, 404, "route not found")
 		return

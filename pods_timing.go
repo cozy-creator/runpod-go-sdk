@@ -7,29 +7,20 @@ import (
 	"time"
 )
 
-// PodReadyTiming decomposes the pod-startup timeline into the buckets that
-// runpod's public API actually exposes. Use this to attribute slow cold-starts
-// to (a) host placement, (b) image pull + container start, or (c) post-runtime
-// worker registration (which the orchestrator must time itself).
-//
-// Timeline:
-//
-//	createdAt ─── provisionDuration ───► lastStartedAt ─── pullAndStartDuration ───► firstRuntimeAt
-//
-// Runpod does NOT separately expose "image pulling" vs "container starting"
-// phases, so PullAndStartDuration is a combined bucket. If runpod ever adds
-// pull-progress fields, the SDK can split it later.
+// PodReadyTiming preserves the provider timestamps and local first-runtime
+// observation. Durations are elapsed intervals, not image-pull or scheduling
+// phase measurements: REST v2 does not expose those phase boundaries.
 type PodReadyTiming struct {
-	PodID                string
-	CreatedAt            time.Time
-	LastStartedAt        time.Time
-	FirstRuntimeAt       time.Time
-	ProvisionDuration    time.Duration
-	PullAndStartDuration time.Duration
-	UptimeSecondsAtReady int
-	Ports                map[string]int
-	PublicIP             string
-	DesiredStatus        string
+	PodID                        string
+	CreatedAt                    time.Time
+	StartedAt                    time.Time
+	FirstRuntimeAt               time.Time
+	CreateToStartedDuration      time.Duration
+	StartedToObservationDuration time.Duration
+	UptimeSecondsAtReady         *int
+	Ports                        map[string]int
+	PublicIP                     string
+	Status                       string
 }
 
 // PodReadyState classifies what the helper observed.
@@ -126,22 +117,22 @@ func (c *Client) WaitForPodReady(ctx context.Context, podID string, opts *WaitFo
 		timing := buildPodReadyTiming(pod)
 		lastTiming = timing
 
-		if pod.Runtime != nil {
+		if pod.Status == "RUNNING" && pod.Runtime != nil {
 			// Runtime first observation — populate FirstRuntimeAt as "now" if the
 			// runtime has appeared since the previous poll. RunPod doesn't expose
-			// the actual transition timestamp, so the orchestrator clock is the
+			// the actual transition timestamp, so the caller clock is the
 			// best signal we have.
 			if timing.FirstRuntimeAt.IsZero() {
 				timing.FirstRuntimeAt = time.Now().UTC()
 			}
-			if !timing.LastStartedAt.IsZero() && timing.FirstRuntimeAt.After(timing.LastStartedAt) {
-				timing.PullAndStartDuration = timing.FirstRuntimeAt.Sub(timing.LastStartedAt)
+			if !timing.StartedAt.IsZero() && timing.FirstRuntimeAt.After(timing.StartedAt) {
+				timing.StartedToObservationDuration = timing.FirstRuntimeAt.Sub(timing.StartedAt)
 			}
 			return timing, PodReadyStateRuntimeReady, nil
 		}
 
-		if abortOnTerminal && c.isPodInErrorState(pod.Status()) {
-			return timing, PodReadyStateTerminal, fmt.Errorf("pod %s entered terminal state %q before runtime came up", podID, pod.Status())
+		if abortOnTerminal && c.isPodInErrorState(pod.Status) {
+			return timing, PodReadyStateTerminal, fmt.Errorf("pod %s entered terminal state %q before runtime came up", podID, pod.Status)
 		}
 
 		if !deadline.IsZero() && time.Now().After(deadline) {
@@ -171,25 +162,27 @@ func (c *Client) PodTimingSnapshot(ctx context.Context, podID string) (*PodReady
 
 func buildPodReadyTiming(pod *Pod) *PodReadyTiming {
 	t := &PodReadyTiming{
-		PodID:         strings.TrimSpace(pod.ID),
-		DesiredStatus: strings.TrimSpace(pod.DesiredStatus),
-		Ports:         derivePortMappings(pod),
+		PodID:  strings.TrimSpace(pod.ID),
+		Status: strings.TrimSpace(pod.Status),
+		Ports:  PodPortMappings(pod),
 	}
 	if pod.CreatedAt != nil {
 		t.CreatedAt = pod.CreatedAt.Time.UTC()
 	}
-	if pod.LastStartedAt != nil {
-		t.LastStartedAt = pod.LastStartedAt.Time.UTC()
+	if pod.StartedAt != nil {
+		t.StartedAt = pod.StartedAt.Time.UTC()
 	}
-	if !t.LastStartedAt.IsZero() && !t.CreatedAt.IsZero() {
-		t.ProvisionDuration = t.LastStartedAt.Sub(t.CreatedAt)
+	if !t.StartedAt.IsZero() && !t.CreatedAt.IsZero() {
+		t.CreateToStartedDuration = t.StartedAt.Sub(t.CreatedAt)
 	}
-	if pod.Runtime != nil {
-		t.UptimeSecondsAtReady = pod.Runtime.UptimeSeconds
-		t.PublicIP = strings.TrimSpace(pod.Runtime.PublicIP)
-	}
-	if t.PublicIP == "" {
-		t.PublicIP = strings.TrimSpace(pod.PublicIP)
+	if pod.Status == "RUNNING" && pod.Runtime != nil {
+		if pod.Runtime.Uptime != nil {
+			t.UptimeSecondsAtReady = pod.Runtime.Uptime
+		}
+		ports, err := (&PodReadback{PodID: pod.ID, REST: pod}).ValidatedPublicTCPEndpoints()
+		if err == nil && len(ports) > 0 {
+			t.PublicIP = *ports[0].IP
+		}
 	}
 	return t
 }

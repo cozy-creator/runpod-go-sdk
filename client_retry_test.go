@@ -20,7 +20,7 @@ func newCountingServer(status int, succeedAfter int32, body string) (*httptest.S
 		n := atomic.AddInt32(&hits, 1)
 		if succeedAfter > 0 && n > succeedAfter {
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprint(w, `{"id":"pod1","name":"n"}`)
+			fmt.Fprint(w, `{"id":"pod1","name":"n","status":"RUNNING"}`)
 			return
 		}
 		w.WriteHeader(status)
@@ -200,7 +200,7 @@ func TestRetryAfterHonoredOn429(t *testing.T) {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, `{"id":"pod1","name":"n"}`)
+		fmt.Fprint(w, `{"id":"pod1","name":"n","status":"RUNNING"}`)
 	}))
 	defer server.Close()
 

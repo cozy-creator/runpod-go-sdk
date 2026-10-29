@@ -89,7 +89,7 @@ func (c *Client) StreamPodLogs(ctx context.Context, podID string, options *PodLo
 			headers.Set("Last-Event-ID", options.LastEventID)
 		}
 	}
-	endpoint := strings.TrimRight(c.restV2BaseURL, "/") + "/pods/" + url.PathEscape(podID) + "/logs"
+	endpoint := strings.TrimRight(c.baseURL, "/") + "/pods/" + url.PathEscape(podID) + "/logs"
 	if encoded := query.Encode(); encoded != "" {
 		endpoint += "?" + encoded
 	}

@@ -8,484 +8,319 @@ import (
 	"io"
 	"net/url"
 	"path"
+	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 )
 
-const podNameLookupPageSize = 100
+var podCUDAVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+$`)
 
-// CreatePod creates a new RunPod instance.
-//
-// When req.GPUTypeIDs contains more than one entry, CreatePod fans out via
-// CreatePodWithFallback: RunPod's REST API does not walk the list itself and
-// returns 500 "no instances available" when the first type has no stock.
-// Stock-outs surface as errors matching errors.Is(err, ErrNoCapacity).
+// CreatePod sends one native REST v2 create. Use CreatePodWithFallback to
+// explicitly try several GPU types; each attempt is a separate purchase.
 func (c *Client) CreatePod(ctx context.Context, req *CreatePodRequest) (*Pod, error) {
-	if req != nil && len(req.GPUTypeIDs) > 1 {
-		return c.CreatePodWithFallback(ctx, req, req.GPUTypeIDs, nil)
-	}
 	return c.createPod(ctx, req)
 }
 
-// createPod performs a single POST /pods with no fan-out.
 func (c *Client) createPod(ctx context.Context, req *CreatePodRequest) (*Pod, error) {
-	prepared, err := c.PrepareCreatePod(req)
+	body, err := c.PrepareCreatePod(req)
 	if err != nil {
 		return nil, err
 	}
-	return c.ExecuteCreatePod(ctx, prepared)
+	return c.ExecuteCreatePod(ctx, body)
 }
 
-// PrepareCreatePod validates a single provider create and returns the exact
-// JSON bytes to record before making the call. A GPU request must name exactly
-// one type: fallback attempts are separate purchase obligations and must each
-// be prepared and recorded separately.
+// PrepareCreatePod returns the exact native v2 body to durably record before
+// purchase. Executing those bytes does not marshal or translate them again.
 func (c *Client) PrepareCreatePod(req *CreatePodRequest) ([]byte, error) {
 	if err := c.validateCreatePodRequest(req); err != nil {
 		return nil, err
 	}
-	if !strings.EqualFold(strings.TrimSpace(req.ComputeType), "CPU") && len(req.GPUTypeIDs) != 1 {
-		return nil, NewValidationError("gpuTypeIds", "must contain exactly one type for a prepared create")
-	}
-	if req.MinCudaVersion != "" {
-		return prepareCUDAFloorPod(req)
-	}
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("prepare pod create: %w", err)
-	}
-	return body, nil
+	return json.Marshal(req)
 }
 
-// InspectPreparedCreatePod decodes and validates exact bytes previously
-// returned by PrepareCreatePod without changing them. Durable controllers use
-// the returned provider-shaped request to prove that a recorded obligation
-// still names the SKU, count, datacenter, and volume they authorized.
-func (c *Client) InspectPreparedCreatePod(prepared []byte) (*CreatePodRequest, error) {
-	if len(prepared) == 0 {
-		return nil, NewValidationError("prepared", "cannot be empty")
-	}
-	if isGraphQLPodCreate(prepared) {
-		return c.inspectCUDAFloorPod(prepared)
-	}
-	dec := json.NewDecoder(bytes.NewReader(prepared))
-	dec.DisallowUnknownFields()
+// InspectPreparedCreatePod refuses corrupt, unknown-field, or obsolete bodies.
+// Durable records must be explicitly migrated by their owner, never rewritten
+// while executing an already-authorized purchase.
+func (c *Client) InspectPreparedCreatePod(body []byte) (*CreatePodRequest, error) {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
 	var req CreatePodRequest
-	if err := dec.Decode(&req); err != nil {
-		return nil, NewValidationError("prepared", "must be a valid closed pod-create JSON object")
+	if err := decoder.Decode(&req); err != nil {
+		return nil, NewValidationError("prepared", "must be a closed REST v2 create object")
 	}
-	var trailing any
-	if err := dec.Decode(&trailing); err != io.EOF {
-		return nil, NewValidationError("prepared", "must contain exactly one pod-create JSON object")
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return nil, NewValidationError("prepared", "must contain exactly one create object")
 	}
 	if err := c.validateCreatePodRequest(&req); err != nil {
 		return nil, err
 	}
-	if !strings.EqualFold(strings.TrimSpace(req.ComputeType), "CPU") && len(req.GPUTypeIDs) != 1 {
-		return nil, NewValidationError("gpuTypeIds", "must contain exactly one type for a prepared create")
-	}
 	return &req, nil
 }
 
-// ExecuteCreatePod sends a body returned by PrepareCreatePod without
-// re-marshaling it. The bytes are validated again so corrupt or incompatible
-// durable records are refused before the wire; validation never changes the
-// bytes sent.
+// ExecuteCreatePod sends the recorded body unchanged. POST is never replayed
+// after an ambiguous transport or server failure.
 func (c *Client) ExecuteCreatePod(ctx context.Context, prepared []byte) (*Pod, error) {
 	body := append([]byte(nil), prepared...)
 	req, err := c.InspectPreparedCreatePod(body)
 	if err != nil {
 		return nil, err
 	}
-	if isGraphQLPodCreate(body) {
-		return c.executeCUDAFloorPod(ctx, body, req)
-	}
-
 	var pod Pod
-	err = c.postBytes(ctx, "/pods", body, &pod)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create pod: %w", classifyCreatePodError(err, req))
+	if err := c.postBytes(ctx, "/pods", body, &pod); err != nil {
+		return nil, fmt.Errorf("create pod: %w", classifyCreatePodError(err, req))
 	}
-
-	pod.normalize()
+	if err := validatePodIdentity(&pod, ""); err != nil {
+		return nil, fmt.Errorf("create pod: %w", err)
+	}
 	return &pod, nil
 }
 
-// CreateSpotPod creates a spot/interruptible pod. The caller's request is
-// not mutated. Set req.BidPerGPUUSDMicrosPerHour above the market floor (see
-// ListGPUOffers for current minimum bids); when zero RunPod bids the
-// current minimum.
-//
-// Reclaim semantics: when RunPod preempts a spot pod (outbid or capacity
-// reclaimed) the pod is stopped, not deleted — GetPod reports
-// desiredStatus="EXITED" with the runtime block cleared, exactly like a
-// container exit. There is no dedicated preemption signal or notice period
-// in the public API; poll pod status and treat an unexpected EXITED on an
-// interruptible pod as a probable reclaim.
-func (c *Client) CreateSpotPod(ctx context.Context, req *CreatePodRequest) (*Pod, error) {
+// GetPod fetches the full native v2 resource, including live runtime metrics.
+func (c *Client) GetPod(ctx context.Context, podID string) (*Pod, error) {
+	if err := validatePodID(podID); err != nil {
+		return nil, err
+	}
+	var pod Pod
+	if err := c.Get(ctx, "/pods/"+url.PathEscape(podID), &pod); err != nil {
+		return nil, fmt.Errorf("get pod %s: %w", podID, err)
+	}
+	if err := validatePodIdentity(&pod, podID); err != nil {
+		return nil, err
+	}
+	return &pod, nil
+}
+
+func (c *Client) UpdatePod(ctx context.Context, podID string, req *UpdatePodRequest) (*Pod, error) {
+	if err := validatePodID(podID); err != nil {
+		return nil, err
+	}
 	if req == nil {
 		return nil, NewValidationError("request", "cannot be nil")
 	}
-	spotReq := *req
-	spotReq.Interruptible = true
-	return c.CreatePod(ctx, &spotReq)
-}
-
-// GetPod retrieves a pod by ID
-func (c *Client) GetPod(ctx context.Context, podID string) (*Pod, error) {
-	return c.GetPodWithOptions(ctx, podID, nil)
-}
-
-// GetPodWithOptions retrieves a pod by ID with include* query options.
-func (c *Client) GetPodWithOptions(ctx context.Context, podID string, opts *GetPodOptions) (*Pod, error) {
-	if err := c.validateRequired("podID", podID); err != nil {
+	if req.Name != nil && strings.TrimSpace(*req.Name) == "" {
+		return nil, NewValidationError("name", "cannot be empty")
+	}
+	if req.Disk != nil && *req.Disk < 1 {
+		return nil, NewValidationError("disk", "must be positive")
+	}
+	var pod Pod
+	if err := c.Patch(ctx, "/pods/"+url.PathEscape(podID), req, &pod); err != nil {
 		return nil, err
 	}
-
-	endpoint := fmt.Sprintf("/pods/%s", podID)
-	if opts != nil {
-		q := url.Values{}
-		if opts.IncludeMachine {
-			q.Set("includeMachine", "true")
-		}
-		if opts.IncludeNetworkVolume {
-			q.Set("includeNetworkVolume", "true")
-		}
-		if opts.IncludeSavingsPlans {
-			q.Set("includeSavingsPlans", "true")
-		}
-		if opts.IncludeTemplate {
-			q.Set("includeTemplate", "true")
-		}
-		if opts.IncludeWorkers {
-			q.Set("includeWorkers", "true")
-		}
-		if encoded := q.Encode(); encoded != "" {
-			endpoint += "?" + encoded
-		}
+	if err := validatePodIdentity(&pod, podID); err != nil {
+		return nil, err
 	}
-
-	var pod Pod
-	err := c.Get(ctx, endpoint, &pod)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get pod %s: %w", podID, err)
-	}
-
-	pod.normalize()
 	return &pod, nil
 }
 
-// ListPods lists all pods with optional filtering
+// ListPods follows every remaining cursor page. A malformed or stalled page
+// is an error: an incomplete list cannot establish resource absence.
 func (c *Client) ListPods(ctx context.Context, opts *ListOptions) ([]*Pod, error) {
-	return c.listPods(ctx, c.buildListURL("/pods", opts))
+	options := ListOptions{}
+	if opts != nil {
+		options = *opts
+	}
+	if options.Limit < 0 || options.Limit > 1000 {
+		return nil, NewValidationError("limit", "must be between 1 and 1000, or zero for the provider default")
+	}
+	seenCursors := map[string]bool{options.Cursor: true}
+	seenIDs := map[string]bool{}
+	pods := make([]*Pod, 0)
+	for {
+		var result struct {
+			Pods       []*Pod `json:"pods"`
+			Pagination *struct {
+				NextCursor  json.RawMessage `json:"nextCursor"`
+				HasNextPage *bool           `json:"hasNextPage"`
+			} `json:"pagination"`
+		}
+		if err := c.Get(ctx, c.buildListURL("/pods", &options), &result); err != nil {
+			return nil, fmt.Errorf("list pods: %w", err)
+		}
+		if result.Pods == nil || result.Pagination == nil || result.Pagination.HasNextPage == nil || len(result.Pagination.NextCursor) == 0 {
+			return nil, fmt.Errorf("list pods: response omitted pods or pagination")
+		}
+		added := 0
+		for _, pod := range result.Pods {
+			if err := validatePodIdentity(pod, ""); err != nil {
+				return nil, fmt.Errorf("list pods: %w", err)
+			}
+			if strings.TrimSpace(pod.Name) == "" {
+				return nil, fmt.Errorf("list pods: pod %s omitted its name", pod.ID)
+			}
+			if seenIDs[pod.ID] {
+				continue
+			}
+			seenIDs[pod.ID] = true
+			added++
+			pods = append(pods, pod)
+		}
+		var cursor *string
+		if err := json.Unmarshal(result.Pagination.NextCursor, &cursor); err != nil {
+			return nil, fmt.Errorf("list pods: invalid next cursor: %w", err)
+		}
+		if !*result.Pagination.HasNextPage {
+			return pods, nil
+		}
+		if cursor == nil || strings.TrimSpace(*cursor) == "" || seenCursors[*cursor] || added == 0 {
+			return nil, fmt.Errorf("list pods: pagination did not advance")
+		}
+		seenCursors[*cursor] = true
+		options.Cursor = *cursor
+	}
 }
 
-// FindPodsByName returns every exact provider-side match for name. RunPod pod
-// names are not unique, so this method deliberately returns all records and
-// makes no adoption, health, or readiness decision for the caller.
-//
-// The lookup walks the provider's offset pagination and refuses a page that
-// adds no new pod IDs; silently looping or treating an incomplete lookup as
-// absence could lead a recovery path to buy a duplicate pod.
+// FindPodsByName scans all pages and returns every exact match. Names are not
+// unique and v2 does not offer a server-side name filter.
 func (c *Client) FindPodsByName(ctx context.Context, name string) ([]*Pod, error) {
 	if strings.TrimSpace(name) == "" {
 		return nil, NewValidationError("name", "cannot be empty")
 	}
-
-	seen := make(map[string]struct{})
-	var matches []*Pod
-	for offset := 0; ; {
-		endpoint := c.buildURLWithParams("/pods", map[string]string{
-			"name":   name,
-			"limit":  strconv.Itoa(podNameLookupPageSize),
-			"offset": strconv.Itoa(offset),
-		})
-		page, err := c.listPods(ctx, endpoint)
-		if err != nil {
-			return nil, fmt.Errorf("find pods by name %q: %w", name, err)
-		}
-		if len(page) == 0 {
-			break
-		}
-
-		advanced := false
-		for _, pod := range page {
-			if pod == nil || strings.TrimSpace(pod.ID) == "" {
-				return nil, fmt.Errorf("find pods by name %q: provider response omitted a pod id", name)
-			}
-			if _, ok := seen[pod.ID]; ok {
-				continue
-			}
-			seen[pod.ID] = struct{}{}
-			advanced = true
-			if pod.Name == name {
-				matches = append(matches, pod)
-			}
-		}
-		if len(page) < podNameLookupPageSize {
-			break
-		}
-		if !advanced {
-			return nil, fmt.Errorf("find pods by name %q: pagination did not advance at offset %d", name, offset)
-		}
-		offset += len(page)
+	pods, err := c.ListPods(ctx, &ListOptions{Limit: 100})
+	if err != nil {
+		return nil, err
 	}
-
+	matches := make([]*Pod, 0)
+	for _, pod := range pods {
+		if pod.Name == name {
+			matches = append(matches, pod)
+		}
+	}
 	sort.Slice(matches, func(i, j int) bool { return matches[i].ID < matches[j].ID })
 	return matches, nil
 }
 
-func (c *Client) listPods(ctx context.Context, endpoint string) ([]*Pod, error) {
-
-	// RunPod has returned multiple shapes for this endpoint over time:
-	// - [...] (current documented shape)
-	// - {"pods":[...]} (legacy compatibility shape)
-	//
-	// Be permissive so higher-level schedulers can reliably enforce max_workers / pod counts.
-	var raw json.RawMessage
-	if err := c.Get(ctx, endpoint, &raw); err != nil {
-		return nil, fmt.Errorf("failed to list pods: %w", err)
-	}
-	if len(raw) == 0 {
-		return nil, nil
-	}
-
-	// Retain the legacy object wrapper before decoding the current bare array.
-	var wrapped struct {
-		Pods []*Pod `json:"pods"`
-	}
-	if err := json.Unmarshal(raw, &wrapped); err == nil && wrapped.Pods != nil {
-		normalizePods(wrapped.Pods)
-		return wrapped.Pods, nil
-	}
-
-	// Fallback: bare array.
-	var pods []*Pod
-	if err := json.Unmarshal(raw, &pods); err == nil {
-		normalizePods(pods)
-		return pods, nil
-	}
-
-	return nil, fmt.Errorf("failed to list pods: unexpected response shape")
-}
-
-// StopPod stops a running pod
-func (c *Client) StopPod(ctx context.Context, podID string) error {
-	if err := c.validateRequired("podID", podID); err != nil {
-		return err
-	}
-
-	endpoint := fmt.Sprintf("/pods/%s/stop", podID)
-	err := c.Post(ctx, endpoint, nil, nil)
-	if err != nil {
-		return fmt.Errorf("failed to stop pod %s: %w", podID, err)
-	}
-
-	return nil
-}
-
-// ResumePod resumes a stopped pod
-func (c *Client) ResumePod(ctx context.Context, podID string) (*Pod, error) {
-	if err := c.validateRequired("podID", podID); err != nil {
+func (c *Client) podAction(ctx context.Context, podID, action string) (*Pod, error) {
+	if err := validatePodID(podID); err != nil {
 		return nil, err
 	}
-
 	var pod Pod
-	endpoint := fmt.Sprintf("/pods/%s/resume", podID)
-	err := c.Post(ctx, endpoint, nil, &pod)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resume pod %s: %w", podID, err)
+	if err := c.Post(ctx, "/pods/"+url.PathEscape(podID)+"/action", map[string]string{"action": action}, &pod); err != nil {
+		return nil, err
 	}
-
-	pod.normalize()
+	if err := validatePodIdentity(&pod, podID); err != nil {
+		return nil, err
+	}
 	return &pod, nil
 }
 
-// TerminatePod terminates/deletes a pod
+func (c *Client) StopPod(ctx context.Context, podID string) error {
+	_, err := c.podAction(ctx, podID, "stop")
+	return err
+}
+func (c *Client) ResumePod(ctx context.Context, podID string) (*Pod, error) {
+	return c.podAction(ctx, podID, "start")
+}
+func (c *Client) RestartPod(ctx context.Context, podID string) (*Pod, error) {
+	return c.podAction(ctx, podID, "restart")
+}
 func (c *Client) TerminatePod(ctx context.Context, podID string) error {
-	if err := c.validateRequired("podID", podID); err != nil {
+	if err := validatePodID(podID); err != nil {
 		return err
 	}
+	return c.Delete(ctx, "/pods/"+url.PathEscape(podID))
+}
 
-	endpoint := fmt.Sprintf("/pods/%s", podID)
-	err := c.Delete(ctx, endpoint)
-	if err != nil {
-		return fmt.Errorf("failed to terminate pod %s: %w", podID, err)
+func validatePodID(id string) error {
+	if id == "" || id != strings.TrimSpace(id) {
+		return NewValidationError("podID", "must be a nonempty exact pod id")
 	}
-
 	return nil
 }
 
-// validateCreatePodRequest validates a pod creation request. The GPU-only
-// fields (gpuTypeIds, gpuCount) are required when ComputeType="GPU" or empty
-// (the SDK historically defaulted to GPU); for CPU pods (ComputeType="CPU")
-// they are forbidden — RunPod's REST API rejects unknown fields outright, so
-// sending a zeroed gpuCount on a CPU request would fail. CPU placement allows
-// an optional cpuFlavorIds list to constrain which CPU family to land on, but
-// the list is not required — RunPod auto-picks the cheapest available flavor
-// when omitted.
+func validatePodIdentity(pod *Pod, requested string) error {
+	if pod == nil || pod.ID == "" || pod.ID != strings.TrimSpace(pod.ID) {
+		return fmt.Errorf("pod response omitted an exact id")
+	}
+	if requested != "" && pod.ID != requested {
+		return fmt.Errorf("pod identity mismatch: requested %q, received %q", requested, pod.ID)
+	}
+	switch pod.Status {
+	case "PROVISIONING", "STARTING", "RUNNING", "EXITED", "ERROR", "TERMINATED":
+	default:
+		return fmt.Errorf("pod %s has missing or unknown status %q", pod.ID, pod.Status)
+	}
+	return nil
+}
+
 func (c *Client) validateCreatePodRequest(req *CreatePodRequest) error {
 	if req == nil {
 		return NewValidationError("request", "cannot be nil")
 	}
-
-	// Required fields
-	if err := c.validateRequired("name", req.Name); err != nil {
-		return err
+	if strings.TrimSpace(req.Name) == "" {
+		return NewValidationError("name", "cannot be empty")
 	}
-	if err := c.validateRequired("imageName", req.ImageName); err != nil {
-		return err
+	if strings.TrimSpace(req.Image) == "" && strings.TrimSpace(req.TemplateID) == "" {
+		return NewValidationError("image", "image or templateId is required")
 	}
-
-	// Compute-class-specific selector validation.
-	isCPU := strings.EqualFold(strings.TrimSpace(req.ComputeType), "CPU")
-	if isCPU {
-		if len(req.GPUTypeIDs) > 0 {
-			return NewValidationError("gpuTypeIds", "must not be set when computeType is CPU")
+	if (req.GPU == nil) == (req.CPU == nil) {
+		return NewValidationError("gpu/cpu", "exactly one compute configuration is required")
+	}
+	if req.Disk < 0 {
+		return NewValidationError("disk", "cannot be negative")
+	}
+	if req.Cloud != "" && req.Cloud != "SECURE" && req.Cloud != "COMMUNITY" {
+		return NewValidationError("cloud", "must be SECURE or COMMUNITY")
+	}
+	if req.GPU != nil {
+		gpu := req.GPU
+		if strings.TrimSpace(gpu.ID) == "" {
+			return NewValidationError("gpu.id", "cannot be empty")
 		}
-		if req.GPUCount > 0 {
-			return NewValidationError("gpuCount", "must not be set when computeType is CPU")
+		if gpu.Count < 0 {
+			return NewValidationError("gpu.count", "must be positive or omitted")
 		}
-		if req.MinRAMPerGPU != 0 {
-			return NewValidationError("minRAMPerGPU", "must not be set when computeType is CPU")
+		if gpu.MinRAMPerGPU < 0 || gpu.MinVCPUCountPerGPU < 0 {
+			return NewValidationError("gpu", "resource floors cannot be negative")
 		}
-		if req.MinVCPUPerGPU != 0 {
-			return NewValidationError("minVCPUPerGPU", "must not be set when computeType is CPU")
+		if gpu.MinCUDAVersion != "" && !podCUDAVersionPattern.MatchString(gpu.MinCUDAVersion) {
+			return NewValidationError("gpu.minCudaVersion", "must use major.minor")
 		}
-		switch req.CPUFlavorPriority {
-		case "", CPUFlavorPriorityAvailability:
-		case CPUFlavorPriorityCustom:
-			if len(req.CPUFlavorIDs) == 0 {
-				return NewValidationError("cpuFlavorIds", "must not be empty when cpuFlavorPriority is custom")
-			}
-		default:
-			return NewValidationErrorWithValue("cpuFlavorPriority", "must be either 'availability' or 'custom'", req.CPUFlavorPriority)
+		if gpu.MinCUDAVersion != "" && len(gpu.AllowedCUDAVersions) > 0 {
+			return NewValidationError("gpu", "allowedCudaVersions and minCudaVersion are mutually exclusive")
 		}
-	} else {
-		// GPU is the historical default; require the GPU selector + count.
-		if err := c.validateRequired("gpuTypeId", req.GPUTypeIDs); err != nil {
-			return err
-		}
-		if err := c.validatePositive("gpuCount", req.GPUCount); err != nil {
-			return err
-		}
-		if len(req.CPUFlavorIDs) > 0 {
-			return NewValidationError("cpuFlavorIds", "must not be set unless computeType is CPU")
-		}
-		if req.CPUFlavorPriority != "" {
-			return NewValidationError("cpuFlavorPriority", "must not be set unless computeType is CPU")
-		}
-		if req.MinRAMPerGPU != 0 {
-			if err := c.validatePositive("minRAMPerGPU", req.MinRAMPerGPU); err != nil {
-				return err
-			}
-		}
-		if req.MinVCPUPerGPU != 0 {
-			if err := c.validatePositive("minVCPUPerGPU", req.MinVCPUPerGPU); err != nil {
-				return err
+		for _, version := range gpu.AllowedCUDAVersions {
+			if !podCUDAVersionPattern.MatchString(version) {
+				return NewValidationError("gpu.allowedCudaVersions", "must use major.minor")
 			}
 		}
 	}
-
-	if err := c.validatePositive("containerDiskInGb", req.ContainerDiskInGB); err != nil {
-		return err
-	}
-
-	// Optional positive values
-	if req.VCPUCount > 0 {
-		if err := c.validatePositive("vcpuCount", req.VCPUCount); err != nil {
-			return err
+	if req.CPU != nil {
+		if strings.TrimSpace(req.CPU.ID) == "" {
+			return NewValidationError("cpu.id", "cannot be empty")
+		}
+		n := req.CPU.VCPUCount
+		if n < 2 || n&(n-1) != 0 {
+			return NewValidationError("cpu.vcpuCount", "must be a power of two of at least 2")
+		}
+		if req.Cloud == "COMMUNITY" {
+			return NewValidationError("cloud", "CPU pods require SECURE cloud")
 		}
 	}
-	if req.VolumeInGB > 0 {
-		if err := c.validatePositive("volumeInGb", req.VolumeInGB); err != nil {
-			return err
-		}
-	}
-	if req.MinDownloadMbps < 0 {
-		return NewValidationErrorWithValue("minDownloadMbps", "cannot be negative", req.MinDownloadMbps)
-	}
-	if req.MinUploadMbps < 0 {
-		return NewValidationErrorWithValue("minUploadMbps", "cannot be negative", req.MinUploadMbps)
-	}
-
-	// Bid prices only make sense on interruptible (spot) pods.
-	if req.BidPerGPUUSDMicrosPerHour != 0 {
-		if req.BidPerGPUUSDMicrosPerHour < 0 {
-			return NewValidationErrorWithValue("bidPerGpu", "must be positive", req.BidPerGPUUSDMicrosPerHour)
-		}
-		if !req.Interruptible {
-			return NewValidationError("bidPerGpu", "requires interruptible=true (spot pods)")
-		}
-	}
-
-	// Validate cloud type
-	if req.CloudType != "" {
-		validCloudTypes := []string{"SECURE", "COMMUNITY"}
-		isValid := false
-		for _, validType := range validCloudTypes {
-			if req.CloudType == validType {
-				isValid = true
-				break
+	if req.Mounts != nil {
+		mounts := req.Mounts
+		if mounts.Persistent != nil {
+			if req.CPU != nil || len(mounts.Network)+len(mounts.Global) > 0 {
+				return NewValidationError("mounts.persistent", "cannot be combined with CPU, network, or global mounts")
+			}
+			if mounts.Persistent.Size < 10 || !path.IsAbs(mounts.Persistent.Path) {
+				return NewValidationError("mounts.persistent", "requires at least 10 GB and an absolute path")
 			}
 		}
-		if !isValid {
-			return NewValidationErrorWithValue("cloudType", "must be either 'SECURE' or 'COMMUNITY'", req.CloudType)
+		if len(mounts.Network) > 1 || len(mounts.Global) > 1 {
+			return NewValidationError("mounts", "at most one network and one global volume are supported")
 		}
-	}
-
-	// Network volumes are a create-time, datacenter-local Secure Cloud
-	// attachment. Keep the three provider constraints inseparable so callers
-	// cannot accidentally ask RunPod to attach a volume while still allowing
-	// placement in another datacenter or in Community Cloud.
-	if strings.TrimSpace(req.NetworkVolumeID) != "" {
-		if strings.EqualFold(strings.TrimSpace(req.CloudType), "COMMUNITY") {
-			return NewValidationError("cloudType", "must be SECURE when networkVolumeId is set")
-		}
-		if len(req.DataCenterIDs) != 1 || strings.TrimSpace(req.DataCenterIDs[0]) == "" {
-			return NewValidationError("dataCenterIds", "must contain exactly the network volume datacenter")
-		}
-		if req.VolumeInGB != 0 {
-			return NewValidationError("volumeInGb", "must be omitted when networkVolumeId is set")
-		}
-		if mount := strings.TrimSpace(req.VolumeMountPath); mount != "" && !path.IsAbs(mount) {
-			return NewValidationError("volumeMountPath", "must be an absolute POSIX container path")
-		}
-	}
-
-	// Validate compute type
-	if req.ComputeType != "" {
-		validComputeTypes := []string{"GPU", "CPU"}
-		isValid := false
-		for _, validType := range validComputeTypes {
-			if req.ComputeType == validType {
-				isValid = true
-				break
+		for _, mount := range append(append([]VolumeMount(nil), mounts.Network...), mounts.Global...) {
+			if strings.TrimSpace(mount.VolumeID) == "" || !path.IsAbs(mount.Path) {
+				return NewValidationError("mounts", "volume mounts require an id and absolute path")
 			}
 		}
-		if !isValid {
-			return NewValidationErrorWithValue("computeType", "must be either 'GPU' or 'CPU'", req.ComputeType)
+		if len(mounts.Network) > 0 && req.Cloud == "COMMUNITY" {
+			return NewValidationError("cloud", "network volumes require SECURE cloud")
 		}
 	}
-
-	if strings.TrimSpace(req.MinCudaVersion) != "" && len(req.AllowedCudaVersions) > 0 {
-		return NewValidationError("minCudaVersion", "cannot be set together with allowedCudaVersions")
-	}
-
 	return nil
 }
 
-// isPodInErrorState checks if a pod is in a terminal error state
-func (c *Client) isPodInErrorState(status string) bool {
-	errorStates := []string{"EXITED", "DEAD", "TERMINATED", "FAILED"}
-	upperStatus := strings.ToUpper(status)
-
-	for _, errorState := range errorStates {
-		if upperStatus == errorState {
-			return true
-		}
-	}
-
-	return false
-}
+func (c *Client) isPodInErrorState(status string) bool { return isTerminalPodStatus(status) }

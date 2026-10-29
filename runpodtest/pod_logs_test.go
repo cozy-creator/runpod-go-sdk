@@ -12,7 +12,7 @@ import (
 func TestPodLogsPreserveSameTimestampDistinctEvents(t *testing.T) {
 	server := runpodtest.New()
 	defer server.Close()
-	server.AddPod(&runpod.Pod{ID: "pod", DesiredStatus: "RUNNING"})
+	server.AddPod(&runpod.Pod{ID: "pod", Status: "RUNNING"})
 	stamp := time.Date(2026, 9, 25, 20, 45, 44, 0, time.UTC)
 	server.SetPodLogs("pod", []runpod.PodLogEntry{
 		{ID: stamp.Format(time.RFC3339), Source: runpod.PodLogSourceSystem, Timestamp: stamp, Line: "error creating volume"},

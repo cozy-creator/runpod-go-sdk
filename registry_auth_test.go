@@ -17,9 +17,9 @@ func newRegistryAuthServer(t *testing.T) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.Method == "GET" && r.URL.Path == "/containerregistryauth":
-			w.Write([]byte(`[{"id":"auth1","name":"gen-orchestrator:docker.io:bob"}]`))
-		case r.Method == "POST" && r.URL.Path == "/containerregistryauth":
+		case r.Method == "GET" && r.URL.Path == "/registries":
+			w.Write([]byte(`{"registries":[{"id":"auth1","name":"gen-orchestrator:docker.io:bob"}]}`))
+		case r.Method == "POST" && r.URL.Path == "/registries":
 			var req runpod.CreateContainerRegistryAuthRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Fatalf("decode: %v", err)
@@ -28,7 +28,9 @@ func newRegistryAuthServer(t *testing.T) *httptest.Server {
 				t.Fatalf("credentials not marshalled: %+v", req)
 			}
 			json.NewEncoder(w).Encode(runpod.ContainerRegistryAuth{ID: "auth2", Name: req.Name})
-		case r.Method == "DELETE" && r.URL.Path == "/containerregistryauth/auth1":
+		case r.Method == "GET" && r.URL.Path == "/registries/auth1":
+			w.Write([]byte(`{"id":"auth1","name":"gen-orchestrator:docker.io:bob"}`))
+		case r.Method == "DELETE" && r.URL.Path == "/registries/auth1":
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -61,6 +63,9 @@ func TestContainerRegistryAuthCRUD(t *testing.T) {
 		t.Fatalf("unexpected create result %+v", created)
 	}
 
+	if got, err := client.GetContainerRegistryAuth(ctx, "auth1"); err != nil || got.ID != "auth1" {
+		t.Fatalf("get registry: %+v %v", got, err)
+	}
 	if err := client.DeleteContainerRegistryAuth(ctx, "auth1"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -93,5 +98,40 @@ func TestIsRegistryAuthError(t *testing.T) {
 	err := &runpod.NoCapacityError{GPUTypeID: "A", Cause: errors.New("unauthorized")}
 	if runpod.IsRegistryAuthError(err) {
 		t.Error("capacity errors must never classify as registry-auth errors")
+	}
+}
+
+func TestRegistryListsRefuseIncompleteRows(t *testing.T) {
+	for _, body := range []string{`{}`, `{"registries":null}`, `{"registries":[null]}`, `{"registries":[{}]}`, `{"registries":[{"id":"r1"}]}`, `{"registries":[{"id":"r1","name":"one"},{"id":"r1","name":"two"}]}`} {
+		t.Run(body, func(t *testing.T) {
+			client := newResourceClient(t, func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) })
+			if rows, err := client.ListContainerRegistryAuths(context.Background()); err == nil || rows != nil {
+				t.Fatalf("rows=%+v err=%v", rows, err)
+			}
+		})
+	}
+}
+func TestRegistryGetAndCreateRefuseMissingOrForeignIdentities(t *testing.T) {
+	for _, method := range []string{"get", "create"} {
+		for _, body := range []string{"", `{}`, `null`, `{"id":"foreign","name":"foreign-name"}`} {
+			t.Run(method+body, func(t *testing.T) {
+				client := newResourceClient(t, func(w http.ResponseWriter, r *http.Request) {
+					if body == "" {
+						w.WriteHeader(204)
+					} else {
+						fmt.Fprint(w, body)
+					}
+				})
+				var err error
+				if method == "get" {
+					_, err = client.GetContainerRegistryAuth(context.Background(), "r1")
+				} else {
+					_, err = client.CreateContainerRegistryAuth(context.Background(), &runpod.CreateContainerRegistryAuthRequest{Name: "one", Username: "user", Password: "pass"})
+				}
+				if err == nil {
+					t.Fatal("accepted missing or foreign identity")
+				}
+			})
+		}
 	}
 }

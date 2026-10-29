@@ -2,164 +2,54 @@ package runpod_test
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
+	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	runpod "github.com/cozy-creator/runpod-go-sdk"
 )
 
-func TestListDataCenters(t *testing.T) {
-	server := newGPUTypeGraphQLServer(t, func(req testGraphQLRequest) interface{} {
-		if !strings.Contains(req.Query, "dataCenters") || !strings.Contains(req.Query, "gpuAvailability") ||
-			!strings.Contains(req.Query, "storageSupport") {
-			t.Fatalf("unexpected query: %s", req.Query)
+func TestDataCentersJoinScopedV2AvailabilityAndStorageFacts(t *testing.T) {
+	calls := 0
+	c := newCatalogClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		switch r.URL.Path {
+		case "/v2/catalog/datacenters":
+			fmt.Fprint(w, catalogDCs)
+		case "/v2/catalog/gpus":
+			if r.URL.Query().Get("count") != "4" || r.URL.Query().Get("minCudaVersion") != "12.8" {
+				t.Errorf("query=%s", r.URL.RawQuery)
+			}
+			writeGPUs(w, catalogGPU)
+		default:
+			t.Errorf("path=%s", r.URL.Path)
 		}
-		input, ok := req.Variables["input"].(map[string]any)
-		if !ok || input["gpuCount"] != float64(2) || input["secureCloud"] != true || input["minCudaVersion"] != "13.0" {
-			t.Fatalf("availability input = %#v", req.Variables["input"])
+	})
+	dcs, err := c.ListDataCenters(context.Background(), &runpod.GPUAvailabilityFilter{GPUCount: 4, MinCUDAVersion: "12.8"})
+	if err != nil || len(dcs) != 1 || calls != 3 {
+		t.Fatalf("dcs=%+v calls=%d err=%v", dcs, calls, err)
+	}
+	if !dcs[0].StorageSupport || dcs[0].Location != "EUROPE" || len(dcs[0].GPUAvailability) != 2 || dcs[0].GPUAvailability[0].CloudType != "SECURE" || dcs[0].GPUAvailability[1].CloudType != "COMMUNITY" {
+		t.Fatalf("dcs=%+v", dcs)
+	}
+}
+func TestDataCentersRefuseMissingStorageFacts(t *testing.T) {
+	body := strings.Replace(catalogDCs, `"networkVolumeTypes":["STANDARD"],`, "", 1)
+	c := newCatalogClient(t, func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) })
+	if _, err := c.ListDataCenters(context.Background(), nil); err == nil {
+		t.Fatal("unknown storage became unsupported")
+	}
+}
+func TestDataCentersRejectUnknownJoin(t *testing.T) {
+	c := newCatalogClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "datacenters") {
+			fmt.Fprint(w, catalogDCs)
+		} else {
+			writeGPUs(w, strings.Replace(catalogGPU, `"id":"dc1"`, `"id":"other"`, 1))
 		}
-		return map[string]any{"data": map[string]any{"dataCenters": []map[string]any{
-			{
-				"id": "US-GA-1", "name": "US-GA-1", "location": "United States",
-				"storageSupport": false,
-				"gpuAvailability": []map[string]any{
-					{"gpuTypeId": "NVIDIA GeForce RTX 4090", "displayName": "RTX 4090", "stockStatus": "High", "available": true},
-					{"gpuTypeId": "NVIDIA H100 80GB HBM3", "displayName": "H100 SXM", "stockStatus": "Low"},
-				},
-			},
-			{
-				"id": "EU-RO-1", "name": "EU-RO-1", "location": "Europe",
-				"storageSupport": true,
-				"gpuAvailability": []map[string]any{
-					{"gpuTypeId": "NVIDIA A100 80GB PCIe", "displayName": "A100 PCIe", "stockStatus": "Medium"},
-				},
-			},
-		}}}
 	})
-	defer server.Close()
-
-	client := mustClient(t, "test_key", runpod.WithGraphQLBaseURL(server.URL), runpod.WithMaxRetryAttempts(0))
-	secure := true
-	got, err := client.ListDataCenters(t.Context(), &runpod.GPUAvailabilityFilter{
-		GPUCount: 2, SecureCloud: &secure, MinCUDAVersion: "13.0",
-	})
-	if err != nil {
-		t.Fatalf("ListDataCenters: %v", err)
-	}
-	if len(got) != 2 || got[0].ID != "US-GA-1" || got[1].ID != "EU-RO-1" {
-		t.Fatalf("data centers = %#v", got)
-	}
-	// A location that cannot host a network volume must be distinguishable
-	// from one that merely has no volume on it yet.
-	if got[0].StorageSupport || !got[1].StorageSupport {
-		t.Fatalf("storage support = %v/%v, want false/true", got[0].StorageSupport, got[1].StorageSupport)
-	}
-	if availability := got[0].GPUAvailability; len(availability) != 2 ||
-		availability[0].GPUTypeID != "NVIDIA GeForce RTX 4090" || availability[0].StockStatus != "High" || !availability[0].Available {
-		t.Fatalf("gpu availability = %#v", availability)
-	}
-}
-
-func TestListDataCentersEmptyInventory(t *testing.T) {
-	server := newGPUTypeGraphQLServer(t, func(testGraphQLRequest) interface{} {
-		return map[string]any{"data": map[string]any{"dataCenters": []any{}}}
-	})
-	defer server.Close()
-
-	client := mustClient(t, "test_key", runpod.WithGraphQLBaseURL(server.URL), runpod.WithMaxRetryAttempts(0))
-	got, err := client.ListDataCenters(t.Context(), nil)
-	if err != nil {
-		t.Fatalf("ListDataCenters: %v", err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("data centers = %#v, want empty", got)
-	}
-}
-
-func TestListDataCentersGraphQLError(t *testing.T) {
-	server := newGPUTypeGraphQLServer(t, func(testGraphQLRequest) interface{} {
-		return map[string]any{"errors": []map[string]any{{"message": "inventory unavailable"}}}
-	})
-	defer server.Close()
-
-	client := mustClient(t, "test_key", runpod.WithGraphQLBaseURL(server.URL), runpod.WithMaxRetryAttempts(0))
-	_, err := client.ListDataCenters(t.Context(), nil)
-	var graphQLErr *runpod.GraphQLResponseError
-	if !errors.As(err, &graphQLErr) || len(graphQLErr.Errors) != 1 || graphQLErr.Errors[0].Message != "inventory unavailable" {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestListDataCentersMalformedPayload(t *testing.T) {
-	server := newGPUTypeGraphQLServer(t, func(testGraphQLRequest) interface{} {
-		return map[string]any{"data": map[string]any{"dataCenters": "not-an-array"}}
-	})
-	defer server.Close()
-
-	client := mustClient(t, "test_key", runpod.WithGraphQLBaseURL(server.URL), runpod.WithMaxRetryAttempts(0))
-	_, err := client.ListDataCenters(t.Context(), nil)
-	if err == nil || !strings.Contains(err.Error(), "unmarshal GraphQL data payload") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestListDataCentersHonorsContextCancellation(t *testing.T) {
-	started := make(chan struct{})
-	release := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		close(started)
-		select {
-		case <-r.Context().Done():
-		case <-release:
-		}
-	}))
-	defer server.Close()
-
-	client := mustClient(t, "test_key", runpod.WithGraphQLBaseURL(server.URL), runpod.WithMaxRetryAttempts(0))
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		_, err := client.ListDataCenters(ctx, nil)
-		done <- err
-	}()
-	<-started
-	cancel()
-	select {
-	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("error = %v, want context.Canceled", err)
-		}
-		close(release)
-	case <-time.After(time.Second):
-		close(release)
-		t.Fatal("ListDataCenters did not stop after context cancellation")
-	}
-}
-
-func TestListDataCentersMalformedEnvelope(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode("not-an-envelope")
-	}))
-	defer server.Close()
-
-	client := mustClient(t, "test_key", runpod.WithGraphQLBaseURL(server.URL), runpod.WithMaxRetryAttempts(0))
-	_, err := client.ListDataCenters(t.Context(), nil)
-	if err == nil || !strings.Contains(err.Error(), "unmarshal GraphQL response envelope") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestListDataCentersRejectsInvalidShape(t *testing.T) {
-	client := mustClient(t, "test_key")
-	_, err := client.ListDataCenters(t.Context(), &runpod.GPUAvailabilityFilter{GPUCount: -1})
-	var validation *runpod.ValidationError
-	if !errors.As(err, &validation) || validation.Field != "gpuCount" {
-		t.Fatalf("error = %v", err)
+	if _, err := c.ListDataCenters(context.Background(), nil); err == nil {
+		t.Fatal("accepted unknown datacenter join")
 	}
 }

@@ -1,17 +1,5 @@
-// Package runpodtest provides an in-process fake RunPod API server for
-// consumer tests. It implements the endpoints the SDK covers — pods CRUD
-// with per-GPU-type stock-out injection, network volumes, container registry
-// auths, the serverless job lifecycle, and GraphQL gpuTypes/pod lifecycle
-// queries — plus
-// one-shot fault injection (429/500) for retry-path testing.
-//
-// Usage:
-//
-//	srv := runpodtest.New()
-//	defer srv.Close()
-//	client := srv.MustClient()
-//	srv.SetGPUStockOut("NVIDIA GeForce RTX 4090", true)
-//	_, err := client.CreatePod(ctx, req) // 500 "no instances available"
+// Package runpodtest provides a REST v2 control plane and separate Serverless
+// inference fixture. It serves no legacy resource paths or query transport.
 package runpodtest
 
 import (
@@ -19,45 +7,34 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	runpod "github.com/cozy-creator/runpod-go-sdk"
 )
-
-// removedLowestPriceField matches LowestPrice selections RunPod deleted from
-// its live schema (word-bounded so uninterruptablePrice / minCudaVersion
-// don't match).
-var removedLowestPriceField = regexp.MustCompile(`\b(interruptablePrice|cudaVersion)\b`)
 
 type fault struct {
 	status     int
 	body       string
 	retryAfter string
 }
-
-// Server is a fake RunPod API (REST + serverless + GraphQL) backed by
-// in-memory state. Safe for concurrent use.
 type Server struct {
 	httpServer *httptest.Server
-
-	mu                      sync.Mutex
-	nextID                  int
-	pods                    map[string]*runpod.Pod
-	podLogs                 map[string][]runpod.PodLogEntry
-	volumes                 map[string]*runpod.NetworkVolume
-	auths                   map[string]*runpod.ContainerRegistryAuth
-	jobs                    map[string]*fakeJob // key: endpointID + "/" + jobID
-	stockOut                map[string]bool     // GPU type ID -> out of stock
-	gpuTypes                []runpod.GPUType
-	lifecycle               map[string]*runpod.PodLifecycleObservation
-	accountID               string
-	clientBalanceUSDDecimal *string
-	authz                   []string
-	faults                  []fault // queued one-shot injected responses
+	mu         sync.Mutex
+	nextID     int
+	pods       map[string]*runpod.Pod
+	podLogs    map[string][]runpod.PodLogEntry
+	volumes    map[string]*runpod.NetworkVolume
+	auths      map[string]*runpod.ContainerRegistryAuth
+	secrets    map[string]*runpod.Secret
+	jobs       map[string]*fakeJob
+	stockOut   map[string]bool
+	gpuTypes   []runpod.GPUType
+	authz      []string
+	faults     []fault
 }
 
 type fakeJob struct {
@@ -69,122 +46,46 @@ type fakeJob struct {
 	EndpointID string          `json:"endpointId,omitempty"`
 }
 
-// New starts a fake RunPod server. Call Close when done.
 func New() *Server {
-	clientBalance := "100"
-	s := &Server{
-		pods:                    map[string]*runpod.Pod{},
-		podLogs:                 map[string][]runpod.PodLogEntry{},
-		volumes:                 map[string]*runpod.NetworkVolume{},
-		auths:                   map[string]*runpod.ContainerRegistryAuth{},
-		jobs:                    map[string]*fakeJob{},
-		stockOut:                map[string]bool{},
-		lifecycle:               map[string]*runpod.PodLifecycleObservation{},
-		accountID:               "runpodtest-account",
-		clientBalanceUSDDecimal: &clientBalance,
-	}
-	// Default GPU catalog for gpuTypes queries; override with SetGPUTypes.
+	s := &Server{pods: map[string]*runpod.Pod{}, podLogs: map[string][]runpod.PodLogEntry{}, volumes: map[string]*runpod.NetworkVolume{}, auths: map[string]*runpod.ContainerRegistryAuth{}, secrets: map[string]*runpod.Secret{}, jobs: map[string]*fakeJob{}, stockOut: map[string]bool{}}
+	price := runpod.USDMicrosPerHour(300000)
 	for _, spec := range runpod.GPUCatalog() {
-		s.gpuTypes = append(s.gpuTypes, runpod.GPUType{
-			ID:             spec.ID,
-			DisplayName:    spec.DisplayName,
-			MemoryInGB:     spec.VRAMGB,
-			SecureCloud:    true,
-			CommunityCloud: spec.Consumer,
-			LowestPrice: &runpod.Price{
-				MinimumBidPriceUSDMicrosPerHour: usdMicrosPerHourPointer(100_000),
-				OnDemandPriceUSDMicrosPerHour:   300_000,
-				StockStatus:                     "High",
-			},
-		})
+		s.gpuTypes = append(s.gpuTypes, runpod.GPUType{ID: spec.ID, Name: spec.DisplayName, Memory: spec.VRAMGB, Manufacturer: "NVIDIA", Secure: true, Community: spec.Consumer, Price: runpod.GPUPrices{Secure: &price, Community: &price}, MaxCount: runpod.GPUCounts{Secure: 8, Community: 4}, Availability: "HIGH"})
 	}
 	s.httpServer = httptest.NewServer(http.HandlerFunc(s.handle))
 	return s
 }
 
-func usdMicrosPerHourPointer(value runpod.USDMicrosPerHour) *runpod.USDMicrosPerHour {
-	return &value
-}
-
-// URL returns the server's base URL (REST, serverless and GraphQL share it).
 func (s *Server) URL() string { return s.httpServer.URL }
-
-// Close shuts the server down.
-func (s *Server) Close() { s.httpServer.Close() }
-
-// Client returns an SDK client pointed at this fake server.
+func (s *Server) Close()      { s.httpServer.Close() }
 func (s *Server) Client(opts ...runpod.ClientOption) (*runpod.Client, error) {
 	return s.ClientWithAPIKey("runpodtest-key", opts...)
 }
-
-// ClientWithAPIKey returns an SDK client authenticated with apiKey. The fake
-// account identity is independent of the credential so consumers can exercise
-// API-key rotation without changing provider resource ownership.
-func (s *Server) ClientWithAPIKey(apiKey string, opts ...runpod.ClientOption) (*runpod.Client, error) {
-	base := []runpod.ClientOption{
-		runpod.WithBaseURL(s.httpServer.URL),
-		runpod.WithRESTV2BaseURL(s.httpServer.URL + "/rest-v2"),
-		runpod.WithServerlessBaseURL(s.httpServer.URL),
-		runpod.WithGraphQLBaseURL(s.httpServer.URL + "/graphql"),
-	}
-	return runpod.NewClient(apiKey, append(base, opts...)...)
+func (s *Server) ClientWithAPIKey(key string, opts ...runpod.ClientOption) (*runpod.Client, error) {
+	base := []runpod.ClientOption{runpod.WithBaseURL(s.URL() + "/v2"), runpod.WithServerlessBaseURL(s.URL())}
+	return runpod.NewClient(key, append(base, opts...)...)
 }
-
-// MustClient is Client but panics on error (construction only fails on
-// programmer error).
 func (s *Server) MustClient(opts ...runpod.ClientOption) *runpod.Client {
-	client, err := s.Client(opts...)
+	c, err := s.Client(opts...)
 	if err != nil {
 		panic(err)
 	}
-	return client
+	return c
 }
-
-// SetGPUStockOut marks a GPU type in or out of stock. Pod creation for an
-// out-of-stock type returns RunPod's real-world 500 "no instances
-// available" response.
-func (s *Server) SetGPUStockOut(gpuTypeID string, out bool) {
+func (s *Server) SetGPUStockOut(id string, out bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.stockOut[gpuTypeID] = out
+	s.stockOut[id] = out
 }
-
-// FailNext queues a one-shot injected response (e.g. 429 or 500) served for
-// the next API request before normal handling resumes. Call repeatedly to
-// queue several. retryAfter, when non-empty, is sent as the Retry-After
-// header.
-func (s *Server) FailNext(status int, body string, retryAfter string) {
+func (s *Server) FailNext(status int, body, retryAfter string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.faults = append(s.faults, fault{status: status, body: body, retryAfter: retryAfter})
+	s.faults = append(s.faults, fault{status, body, retryAfter})
 }
-
-// SetGPUTypes replaces the catalog served to GraphQL gpuTypes queries.
 func (s *Server) SetGPUTypes(types []runpod.GPUType) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.gpuTypes = append([]runpod.GPUType(nil), types...)
-}
-
-// SetAccountID replaces the stable ID returned by the authenticated
-// `myself` GraphQL query.
-func (s *Server) SetAccountID(accountID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.accountID = accountID
-}
-
-// SetClientBalanceUSDDecimal changes the exact GraphQL clientBalance decimal.
-// Pass nil to exercise an omitted provider balance.
-func (s *Server) SetClientBalanceUSDDecimal(balance *string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if balance == nil {
-		s.clientBalanceUSDDecimal = nil
-		return
-	}
-	copy := *balance
-	s.clientBalanceUSDDecimal = &copy
 }
 
 // AuthorizationHeaders returns the credentials observed by the fake in
@@ -223,19 +124,6 @@ func (s *Server) NetworkVolume(id string) *runpod.NetworkVolume {
 	}
 	copy := *volume
 	return &copy
-}
-
-// SetPodLifecycleObservation sets the GraphQL lifecycle view for a pod.
-// When unset, the fake derives desired status and last-start time from AddPod.
-func (s *Server) SetPodLifecycleObservation(observation *runpod.PodLifecycleObservation) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	copy := *observation
-	if observation.LatestTelemetry != nil {
-		telemetry := *observation.LatestTelemetry
-		copy.LatestTelemetry = &telemetry
-	}
-	s.lifecycle[observation.PodID] = &copy
 }
 
 // Pod returns a seeded/created pod by ID, or nil.
@@ -287,11 +175,10 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 }
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
+	writeJSON(w, status, map[string]any{"title": http.StatusText(status), "status": status, "detail": msg})
 }
 
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
-	// Injected faults take priority (retry-path testing).
 	s.mu.Lock()
 	if len(s.faults) > 0 {
 		f := s.faults[0]
@@ -300,301 +187,404 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		if f.retryAfter != "" {
 			w.Header().Set("Retry-After", f.retryAfter)
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(f.status)
 		fmt.Fprint(w, f.body)
 		return
 	}
+	s.authz = append(s.authz, r.Header.Get("Authorization"))
 	s.mu.Unlock()
-
-	authorization := r.Header.Get("Authorization")
-	s.mu.Lock()
-	s.authz = append(s.authz, authorization)
-	s.mu.Unlock()
-	if authorization == "" {
-		writeErr(w, http.StatusUnauthorized, "unauthorized")
+	if r.Header.Get("Authorization") == "" {
+		writeErr(w, 401, "unauthorized")
 		return
 	}
-
 	path := strings.TrimSuffix(r.URL.Path, "/")
-	switch {
-	case path == "/graphql":
-		s.handleGraphQL(w, r)
-	case strings.HasPrefix(path, "/rest-v2/pods/"):
+	if strings.HasPrefix(path, "/v2/pods/") && strings.HasSuffix(path, "/logs") {
 		s.handlePodLogs(w, r, path)
-	case strings.HasPrefix(path, "/v2/"):
-		s.handleServerless(w, r, path)
-	case strings.HasPrefix(path, "/pods"):
-		s.handlePods(w, r, path)
-	case strings.HasPrefix(path, "/networkvolumes"):
-		s.handleVolumes(w, r, path)
-	case strings.HasPrefix(path, "/containerregistryauth"):
-		s.handleRegistryAuths(w, r, path)
-	default:
-		writeErr(w, http.StatusNotFound, "route not found")
+		return
 	}
-}
-
-// --- pods ---
-
-func (s *Server) handlePods(w http.ResponseWriter, r *http.Request, path string) {
-	parts := strings.Split(strings.TrimPrefix(path, "/"), "/") // pods[, id[, action]]
-
 	switch {
-	case r.Method == http.MethodPost && len(parts) == 1:
-		var req runpod.CreatePodRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid body")
-			return
-		}
+	case path == "/v2/pods" || strings.HasPrefix(path, "/v2/pods/"):
+		s.handlePods(w, r, strings.TrimPrefix(path, "/v2"))
+	case path == "/v2/network-volumes" || strings.HasPrefix(path, "/v2/network-volumes/"):
+		s.handleVolumes(w, r, strings.TrimPrefix(path, "/v2"))
+	case path == "/v2/registries" || strings.HasPrefix(path, "/v2/registries/"):
+		s.handleRegistryAuths(w, r, strings.TrimPrefix(path, "/v2"))
+	case path == "/v2/catalog/gpus" && r.Method == http.MethodGet:
 		s.mu.Lock()
-		for _, gpuType := range req.GPUTypeIDs {
-			if s.stockOut[gpuType] {
-				s.mu.Unlock()
-				// RunPod's real stock-out shape: 500, not 4xx.
-				writeErr(w, http.StatusInternalServerError, "no instances available")
-				return
-			}
-		}
-		var attached *runpod.NetworkVolume
-		if volumeID := strings.TrimSpace(req.NetworkVolumeID); volumeID != "" {
-			volume := s.volumes[volumeID]
-			if volume == nil {
-				s.mu.Unlock()
-				writeErr(w, http.StatusBadRequest, "network volume not found")
-				return
-			}
-			cloudType := strings.TrimSpace(req.CloudType)
-			if cloudType != "" && !strings.EqualFold(cloudType, "SECURE") {
-				s.mu.Unlock()
-				writeErr(w, http.StatusBadRequest, "network volumes require Secure Cloud")
-				return
-			}
-			if len(req.DataCenterIDs) != 1 || strings.TrimSpace(req.DataCenterIDs[0]) != strings.TrimSpace(volume.DataCenterID) {
-				s.mu.Unlock()
-				writeErr(w, http.StatusBadRequest, "network volume datacenter mismatch")
-				return
-			}
-			copy := *volume
-			attached = &copy
-		}
-		pod := &runpod.Pod{
-			ID:                s.newID("pod"),
-			Name:              req.Name,
-			DesiredStatus:     "RUNNING",
-			ImageName:         req.ImageName,
-			GPUCount:          req.GPUCount,
-			ContainerDiskInGB: req.ContainerDiskInGB,
-			Interruptible:     req.Interruptible,
-			Env:               req.Env,
-			VolumeMountPath:   req.VolumeMountPath,
-			NetworkVolumeID:   req.NetworkVolumeID,
-			NetworkVolume:     attached,
-		}
-		if len(req.GPUTypeIDs) > 0 {
-			pod.Machine = &runpod.Machine{ID: s.newID("machine"), GPUTypeID: req.GPUTypeIDs[0]}
-			if len(req.DataCenterIDs) > 0 {
-				pod.Machine.DataCenterID = strings.TrimSpace(req.DataCenterIDs[0])
-			}
-		}
-		s.pods[pod.ID] = pod
-		s.mu.Unlock()
-		writeJSON(w, http.StatusCreated, pod)
-
-	case r.Method == http.MethodGet && len(parts) == 1:
-		s.mu.Lock()
-		pods := make([]*runpod.Pod, 0, len(s.pods))
-		for _, p := range s.pods {
-			if name := r.URL.Query().Get("name"); name != "" && p.Name != name {
-				continue
-			}
-			pods = append(pods, p)
-		}
-		s.mu.Unlock()
-		sort.Slice(pods, func(i, j int) bool { return pods[i].ID < pods[j].ID })
-		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		if offset > len(pods) {
-			offset = len(pods)
-		}
-		pods = pods[offset:]
-		if limit > 0 && len(pods) > limit {
-			pods = pods[:limit]
-		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{"pods": pods})
-
-	case len(parts) >= 2:
-		podID := parts[1]
-		s.mu.Lock()
-		pod := s.pods[podID]
-		s.mu.Unlock()
-		if pod == nil {
-			writeErr(w, http.StatusNotFound, "pod not found")
-			return
-		}
-		switch {
-		case r.Method == http.MethodGet && len(parts) == 2:
-			writeJSON(w, http.StatusOK, pod)
-		case r.Method == http.MethodDelete && len(parts) == 2:
-			s.mu.Lock()
-			delete(s.pods, podID)
-			s.mu.Unlock()
-			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodPost && len(parts) == 3 && parts[2] == "stop":
-			s.mu.Lock()
-			pod.DesiredStatus = "EXITED"
-			s.mu.Unlock()
-			writeJSON(w, http.StatusOK, pod)
-		case r.Method == http.MethodPost && len(parts) == 3 && parts[2] == "resume":
-			s.mu.Lock()
-			pod.DesiredStatus = "RUNNING"
-			s.mu.Unlock()
-			writeJSON(w, http.StatusOK, pod)
-		default:
-			writeErr(w, http.StatusNotFound, "route not found")
-		}
-
-	default:
-		writeErr(w, http.StatusNotFound, "route not found")
-	}
-}
-
-// --- network volumes ---
-
-func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request, path string) {
-	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
-
-	switch {
-	case r.Method == http.MethodGet && len(parts) == 1:
-		s.mu.Lock()
-		vols := make([]*runpod.NetworkVolume, 0, len(s.volumes))
-		for _, v := range s.volumes {
-			vols = append(vols, v)
-		}
-		s.mu.Unlock()
-		writeJSON(w, http.StatusOK, vols)
-
-	case r.Method == http.MethodPost && len(parts) == 1:
-		var req runpod.CreateNetworkVolumeRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid body")
-			return
-		}
-		vol := &runpod.NetworkVolume{
-			ID:           s.newID("vol"),
-			Name:         req.Name,
-			Size:         req.Size,
-			DataCenterID: req.DataCenterID,
-		}
-		s.mu.Lock()
-		s.volumes[vol.ID] = vol
-		s.mu.Unlock()
-		writeJSON(w, http.StatusCreated, vol)
-
-	case len(parts) == 2:
-		volID := parts[1]
-		s.mu.Lock()
-		vol := s.volumes[volID]
-		s.mu.Unlock()
-		if vol == nil {
-			writeErr(w, http.StatusNotFound, "network volume not found")
-			return
-		}
-		switch r.Method {
-		case http.MethodGet:
-			writeJSON(w, http.StatusOK, vol)
-		case http.MethodPatch:
-			var req runpod.UpdateNetworkVolumeRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				writeErr(w, http.StatusBadRequest, "invalid body")
-				return
-			}
-			s.mu.Lock()
-			if req.Size < vol.Size && req.Size != 0 {
-				s.mu.Unlock()
-				writeErr(w, http.StatusBadRequest, "network volumes can only grow")
-				return
-			}
-			if req.Size != 0 {
-				vol.Size = req.Size
-			}
-			if req.Name != "" {
-				vol.Name = req.Name
-			}
-			s.mu.Unlock()
-			writeJSON(w, http.StatusOK, vol)
-		case http.MethodDelete:
-			s.mu.Lock()
-			for _, pod := range s.pods {
-				if strings.TrimSpace(pod.NetworkVolumeID) == volID {
-					s.mu.Unlock()
-					writeErr(w, http.StatusConflict, "network volume is attached to a pod")
-					return
+		defer s.mu.Unlock()
+		types := append([]runpod.GPUType(nil), s.gpuTypes...)
+		if r.URL.Query().Get("include") == "AVAILABILITY" {
+			for i := range types {
+				if s.stockOut[types[i].ID] {
+					types[i].Availability = "NONE"
 				}
 			}
-			delete(s.volumes, volID)
-			s.mu.Unlock()
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			writeErr(w, http.StatusNotFound, "route not found")
 		}
-
-	default:
-		writeErr(w, http.StatusNotFound, "route not found")
-	}
-}
-
-// --- container registry auths ---
-
-func (s *Server) handleRegistryAuths(w http.ResponseWriter, r *http.Request, path string) {
-	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
-
-	switch {
-	case r.Method == http.MethodGet && len(parts) == 1:
+		writeJSON(w, 200, map[string]any{"gpus": types})
+	case strings.HasPrefix(path, "/v2/catalog/gpus/") && r.Method == http.MethodGet:
 		s.mu.Lock()
-		auths := make([]*runpod.ContainerRegistryAuth, 0, len(s.auths))
-		for _, a := range s.auths {
-			auths = append(auths, a)
-		}
-		s.mu.Unlock()
-		writeJSON(w, http.StatusOK, auths)
-
-	case r.Method == http.MethodPost && len(parts) == 1:
-		var req runpod.CreateContainerRegistryAuthRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid body")
-			return
-		}
-		s.mu.Lock()
-		for _, a := range s.auths {
-			if a.Name == req.Name {
-				s.mu.Unlock()
-				writeErr(w, http.StatusBadRequest, "name already exists")
+		defer s.mu.Unlock()
+		for _, gpu := range s.gpuTypes {
+			if gpu.ID == strings.TrimPrefix(path, "/v2/catalog/gpus/") {
+				writeJSON(w, 200, gpu)
 				return
 			}
 		}
-		auth := &runpod.ContainerRegistryAuth{ID: s.newID("auth"), Name: req.Name}
-		s.auths[auth.ID] = auth
-		s.mu.Unlock()
-		writeJSON(w, http.StatusCreated, auth)
-
-	case r.Method == http.MethodDelete && len(parts) == 2:
-		s.mu.Lock()
-		_, ok := s.auths[parts[1]]
-		delete(s.auths, parts[1])
-		s.mu.Unlock()
-		if !ok {
-			writeErr(w, http.StatusNotFound, "registry auth not found")
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-
+		writeErr(w, 404, "GPU type not found")
+	case path == "/v2/catalog/cpus" && r.Method == http.MethodGet:
+		writeJSON(w, 200, map[string]any{"cpus": []any{}})
+	case path == "/v2/catalog/datacenters" && r.Method == http.MethodGet:
+		writeJSON(w, 200, map[string]any{"dataCenters": []any{}})
+	case path == "/v2/account/secrets" || strings.HasPrefix(path, "/v2/account/secrets/"):
+		s.handleSecrets(w, r, strings.TrimPrefix(path, "/v2/account/secrets"))
+	case strings.HasPrefix(path, "/v2/"):
+		s.handleServerless(w, r, path)
 	default:
-		writeErr(w, http.StatusNotFound, "route not found")
+		writeErr(w, 404, "route not found")
 	}
 }
 
-// --- serverless jobs ---
+func fixturePage[T any](w http.ResponseWriter, r *http.Request, key string, rows []T) {
+	offset, _ := strconv.Atoi(r.URL.Query().Get("cursor"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = 1000
+	}
+	if offset < 0 || offset > len(rows) {
+		writeErr(w, 400, "invalid cursor")
+		return
+	}
+	end := min(offset+limit, len(rows))
+	var next *string
+	if end < len(rows) {
+		cursor := strconv.Itoa(end)
+		next = &cursor
+	}
+	writeJSON(w, 200, map[string]any{key: rows[offset:end], "pagination": map[string]any{"nextCursor": next, "hasNextPage": next != nil}})
+}
+
+func (s *Server) handlePods(w http.ResponseWriter, r *http.Request, path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(parts) == 1 {
+		switch r.Method {
+		case http.MethodPost:
+			var req runpod.CreatePodRequest
+			dec := json.NewDecoder(r.Body)
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(&req); err != nil {
+				writeErr(w, 400, "invalid body")
+				return
+			}
+			if req.GPU != nil && s.stockOut[req.GPU.ID] {
+				writeErr(w, 400, "There are no longer any instances available")
+				return
+			}
+			if req.Mounts != nil {
+				for _, mount := range req.Mounts.Network {
+					volume := s.volumes[mount.VolumeID]
+					if volume == nil {
+						writeErr(w, 400, "network volume not found")
+						return
+					}
+					if req.Cloud != "" && req.Cloud != "SECURE" {
+						writeErr(w, 400, "network volumes require Secure Cloud")
+						return
+					}
+					if len(req.DataCenterIDs) > 0 && (len(req.DataCenterIDs) != 1 || req.DataCenterIDs[0] != volume.DataCenter) {
+						writeErr(w, 400, "network volume datacenter mismatch")
+						return
+					}
+				}
+			}
+			now := &runpod.JSONTime{Time: time.Now().UTC()}
+			pod := &runpod.Pod{ID: s.newID("pod"), Name: req.Name, Status: "RUNNING", Actions: []string{"stop", "restart", "terminate"}, Image: req.Image, Args: req.Args, Entrypoint: req.Entrypoint, Cmd: req.Cmd, Disk: req.Disk, Ports: req.Ports, Env: req.Env, Mounts: req.Mounts, Cloud: req.Cloud, CreatedAt: now, StartedAt: now}
+			if pod.Cloud == "" {
+				pod.Cloud = "SECURE"
+			}
+			if req.Registry != "" {
+				pod.Registry = &req.Registry
+			}
+			if req.GPU != nil {
+				count := req.GPU.Count
+				if count == 0 {
+					count = 1
+				}
+				pod.GPU = &runpod.PodGPU{ID: req.GPU.ID, Count: count}
+			}
+			if req.CPU != nil {
+				pod.CPU = &runpod.PodCPU{ID: req.CPU.ID, VCPUCount: req.CPU.VCPUCount}
+			}
+			if len(req.DataCenterIDs) > 0 {
+				id := req.DataCenterIDs[0]
+				pod.DataCenterID = &id
+			}
+			if pod.Env == nil {
+				pod.Env = map[string]string{}
+			}
+			s.pods[pod.ID] = pod
+			writeJSON(w, 201, pod)
+		case http.MethodGet:
+			rows := make([]*runpod.Pod, 0, len(s.pods))
+			for _, p := range s.pods {
+				copy := *p
+				copy.Runtime = nil
+				rows = append(rows, &copy)
+			}
+			sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+			fixturePage(w, r, "pods", rows)
+		default:
+			writeErr(w, 404, "route not found")
+		}
+		return
+	}
+	pod := s.pods[parts[1]]
+	if pod == nil {
+		writeErr(w, 404, "pod not found")
+		return
+	}
+	switch {
+	case len(parts) == 2 && r.Method == http.MethodGet:
+		writeJSON(w, 200, pod)
+	case len(parts) == 2 && r.Method == http.MethodDelete:
+		delete(s.pods, pod.ID)
+		w.WriteHeader(204)
+	case len(parts) == 2 && r.Method == http.MethodPatch:
+		var patch runpod.UpdatePodRequest
+		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+			writeErr(w, 400, "invalid body")
+			return
+		}
+		if patch.Name != nil {
+			pod.Name = *patch.Name
+		}
+		if patch.Image != nil {
+			pod.Image = *patch.Image
+		}
+		if patch.Disk != nil {
+			pod.Disk = *patch.Disk
+		}
+		if patch.Env != nil {
+			pod.Env = *patch.Env
+		}
+		if patch.Ports != nil {
+			pod.Ports = *patch.Ports
+		}
+		if patch.Registry != nil {
+			pod.Registry = patch.Registry
+		}
+		if patch.Locked != nil {
+			pod.Locked = *patch.Locked
+		}
+		writeJSON(w, 200, pod)
+	case len(parts) == 3 && parts[2] == "action" && r.Method == http.MethodPost:
+		var action struct {
+			Action string `json:"action"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&action); err != nil {
+			writeErr(w, 400, "invalid action")
+			return
+		}
+		switch action.Action {
+		case "stop":
+			pod.Status = "EXITED"
+			pod.Runtime = nil
+		case "start", "restart":
+			pod.Status = "RUNNING"
+		case "terminate":
+			delete(s.pods, pod.ID)
+		default:
+			writeErr(w, 400, "invalid action")
+			return
+		}
+		writeJSON(w, 200, pod)
+	default:
+		writeErr(w, 404, "route not found")
+	}
+}
+
+func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request, path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(parts) == 1 {
+		switch r.Method {
+		case http.MethodGet:
+			rows := make([]*runpod.NetworkVolume, 0, len(s.volumes))
+			for _, v := range s.volumes {
+				rows = append(rows, v)
+			}
+			sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+			fixturePage(w, r, "networkVolumes", rows)
+		case http.MethodPost:
+			var req runpod.CreateNetworkVolumeRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeErr(w, 400, "invalid body")
+				return
+			}
+			tier := req.Type
+			if tier == "" {
+				tier = "STANDARD"
+			}
+			v := &runpod.NetworkVolume{ID: s.newID("vol"), Name: req.Name, Size: req.Size, DataCenter: req.DataCenter, Type: tier}
+			s.volumes[v.ID] = v
+			writeJSON(w, 201, v)
+		default:
+			writeErr(w, 404, "route not found")
+		}
+		return
+	}
+	v := s.volumes[parts[1]]
+	if v == nil {
+		writeErr(w, 404, "network volume not found")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, 200, v)
+	case http.MethodPatch:
+		var req runpod.UpdateNetworkVolumeRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, 400, "invalid body")
+			return
+		}
+		if req.Size != 0 && req.Size < v.Size {
+			writeErr(w, 400, "network volumes can only grow")
+			return
+		}
+		if req.Size > 0 {
+			v.Size = req.Size
+		}
+		if req.Name != "" {
+			v.Name = req.Name
+		}
+		writeJSON(w, 200, v)
+	case http.MethodDelete:
+		for _, p := range s.pods {
+			if p.Mounts != nil {
+				for _, m := range p.Mounts.Network {
+					if m.VolumeID == v.ID {
+						writeErr(w, 409, "network volume is attached to a pod")
+						return
+					}
+				}
+			}
+		}
+		delete(s.volumes, v.ID)
+		w.WriteHeader(204)
+	default:
+		writeErr(w, 404, "route not found")
+	}
+}
+
+func (s *Server) handleRegistryAuths(w http.ResponseWriter, r *http.Request, path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	switch {
+	case len(parts) == 1 && r.Method == http.MethodGet:
+		rows := make([]*runpod.ContainerRegistryAuth, 0, len(s.auths))
+		for _, a := range s.auths {
+			rows = append(rows, a)
+		}
+		writeJSON(w, 200, map[string]any{"registries": rows})
+	case len(parts) == 1 && r.Method == http.MethodPost:
+		var req runpod.CreateContainerRegistryAuthRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, 400, "invalid body")
+			return
+		}
+		for _, a := range s.auths {
+			if a.Name == req.Name {
+				writeErr(w, 400, "name already exists")
+				return
+			}
+		}
+		a := &runpod.ContainerRegistryAuth{ID: s.newID("auth"), Name: req.Name}
+		s.auths[a.ID] = a
+		writeJSON(w, 201, a)
+	case len(parts) == 2 && r.Method == http.MethodGet:
+		a := s.auths[parts[1]]
+		if a == nil {
+			writeErr(w, 404, "registry not found")
+			return
+		}
+		writeJSON(w, 200, a)
+	case len(parts) == 2 && r.Method == http.MethodDelete:
+		if s.auths[parts[1]] == nil {
+			writeErr(w, 404, "registry not found")
+			return
+		}
+		delete(s.auths, parts[1])
+		w.WriteHeader(204)
+	default:
+		writeErr(w, 404, "route not found")
+	}
+}
+
+func (s *Server) handleSecrets(w http.ResponseWriter, r *http.Request, path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id := strings.TrimPrefix(path, "/")
+	if id == "" {
+		switch r.Method {
+		case http.MethodGet:
+			rows := make([]*runpod.Secret, 0, len(s.secrets))
+			for _, v := range s.secrets {
+				if name := r.URL.Query().Get("name"); name == "" || strings.EqualFold(name, v.Name) {
+					rows = append(rows, v)
+				}
+			}
+			writeJSON(w, 200, map[string]any{"secrets": rows})
+		case http.MethodPost:
+			var req runpod.CreateSecretRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeErr(w, 400, "invalid body")
+				return
+			}
+			now := &runpod.JSONTime{Time: time.Now().UTC()}
+			v := &runpod.Secret{ID: s.newID("secret"), Name: req.Name, CreatedAt: now, ValueLastUpdatedAt: now}
+			if req.Description != "" {
+				description := req.Description
+				v.Description = &description
+			}
+			s.secrets[v.ID] = v
+			writeJSON(w, 201, v)
+		default:
+			writeErr(w, 404, "route not found")
+		}
+		return
+	}
+	v := s.secrets[id]
+	if v == nil {
+		writeErr(w, 404, "secret not found")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, 200, v)
+	case http.MethodPatch:
+		var req runpod.UpdateSecretRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, 400, "invalid body")
+			return
+		}
+		if req.Description != nil {
+			v.Description = req.Description
+		}
+		if req.Value != "" {
+			v.ValueLastUpdatedAt = &runpod.JSONTime{Time: time.Now().UTC()}
+		}
+		writeJSON(w, 200, v)
+	case http.MethodDelete:
+		delete(s.secrets, id)
+		w.WriteHeader(204)
+	default:
+		writeErr(w, 404, "route not found")
+	}
+}
 
 func (s *Server) handleServerless(w http.ResponseWriter, r *http.Request, path string) {
 	parts := strings.Split(strings.TrimPrefix(path, "/"), "/") // v2, endpoint, action[, jobID]
@@ -686,118 +676,4 @@ func (s *Server) handleServerless(w http.ResponseWriter, r *http.Request, path s
 	default:
 		writeErr(w, http.StatusNotFound, "route not found")
 	}
-}
-
-// --- GraphQL ---
-
-func (s *Server) handleGraphQL(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Query     string                 `json:"query"`
-		Variables map[string]interface{} `json:"variables"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid graphql request")
-		return
-	}
-	if strings.Contains(req.Query, "myself") {
-		s.mu.Lock()
-		accountID := s.accountID
-		var clientBalance *string
-		if s.clientBalanceUSDDecimal != nil {
-			copy := *s.clientBalanceUSDDecimal
-			clientBalance = &copy
-		}
-		s.mu.Unlock()
-		myself := map[string]interface{}{"id": accountID}
-		if clientBalance != nil {
-			myself["clientBalance"] = *clientBalance
-		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"data": map[string]interface{}{
-				"myself": myself,
-			},
-		})
-		return
-	}
-	if strings.Contains(req.Query, "pod(input:") {
-		input, _ := req.Variables["input"].(map[string]interface{})
-		podID, _ := input["podId"].(string)
-		s.mu.Lock()
-		observation := s.lifecycle[podID]
-		pod := s.pods[podID]
-		if observation != nil {
-			copy := *observation
-			if observation.LatestTelemetry != nil {
-				telemetry := *observation.LatestTelemetry
-				copy.LatestTelemetry = &telemetry
-			}
-			observation = &copy
-		} else if pod != nil {
-			observation = &runpod.PodLifecycleObservation{
-				PodID:         pod.ID,
-				DesiredStatus: pod.DesiredStatus,
-				LastStartedAt: pod.LastStartedAt,
-			}
-		}
-		s.mu.Unlock()
-
-		if observation == nil {
-			writeJSON(w, http.StatusOK, map[string]interface{}{"data": map[string]interface{}{"pod": nil}})
-			return
-		}
-		result := map[string]interface{}{
-			"id":              observation.PodID,
-			"desiredStatus":   observation.DesiredStatus,
-			"lastStartedAt":   observation.LastStartedAt,
-			"latestTelemetry": observation.LatestTelemetry,
-		}
-		if observation.RuntimeUptimeInSeconds != nil {
-			result["runtime"] = map[string]interface{}{"uptimeInSeconds": observation.RuntimeUptimeInSeconds}
-		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{"data": map[string]interface{}{"pod": result}})
-		return
-	}
-	if !strings.Contains(req.Query, "gpuTypes") {
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"errors": []map[string]string{{"message": "runpodtest: unsupported GraphQL query"}},
-		})
-		return
-	}
-	// RunPod removed these LowestPrice fields; reject them like the live API
-	// so schema drift fails unit tests too.
-	if m := removedLowestPriceField.FindString(req.Query); m != "" {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"errors": []map[string]interface{}{{
-				"message":    fmt.Sprintf("Cannot query field %q on type \"LowestPrice\".", m),
-				"extensions": map[string]string{"code": "GRAPHQL_VALIDATION_FAILED"},
-			}},
-		})
-		return
-	}
-
-	s.mu.Lock()
-	types := append([]runpod.GPUType(nil), s.gpuTypes...)
-	s.mu.Unlock()
-
-	// The offers query aliases lowestPrice per cloud; serve both shapes.
-	out := make([]map[string]interface{}, 0, len(types))
-	for _, g := range types {
-		entry := map[string]interface{}{
-			"id":             g.ID,
-			"displayName":    g.DisplayName,
-			"memoryInGb":     g.MemoryInGB,
-			"secureCloud":    g.SecureCloud,
-			"communityCloud": g.CommunityCloud,
-		}
-		if strings.Contains(req.Query, "secure:") {
-			entry["secure"] = g.LowestPrice
-			entry["community"] = g.LowestPrice
-		} else {
-			entry["lowestPrice"] = g.LowestPrice
-		}
-		out = append(out, entry)
-	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"data": map[string]interface{}{"gpuTypes": out},
-	})
 }

@@ -8,7 +8,7 @@ import (
 // auto-selects the cheapest instance size that has stock for the requested
 // `vcpuCount` / `memoryInGb`. The REST API's `cpuFlavorIds` field accepts only
 // these family-level IDs — the granular `cpu5c-2-2` form used by the older
-// GraphQL CPU mutation is not accepted by REST.
+// Use the live REST v2 CPU catalog for provider-authoritative family IDs.
 //
 // Source: probed against the live REST API on 2026-05-15 via
 // `POST /v1/pods` with `cpuFlavorIds: [...]`. Catalog grows when RunPod adds

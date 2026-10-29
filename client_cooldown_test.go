@@ -12,7 +12,7 @@ import (
 	runpod "github.com/cozy-creator/runpod-go-sdk"
 )
 
-func TestClientRetainsRateLimitAcrossRESTAndGraphQL(t *testing.T) {
+func TestClientRetainsRateLimitAcrossRESTResources(t *testing.T) {
 	var hits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
@@ -21,7 +21,7 @@ func TestClientRetainsRateLimitAcrossRESTAndGraphQL(t *testing.T) {
 		_, _ = w.Write([]byte(`{"message":"provider cooldown","code":"RATE_LIMIT"}`))
 	}))
 	defer server.Close()
-	client := mustClient(t, "fixture", runpod.WithBaseURL(server.URL), runpod.WithGraphQLBaseURL(server.URL), runpod.WithMaxRetryAttempts(0))
+	client := mustClient(t, "fixture", runpod.WithBaseURL(server.URL), runpod.WithMaxRetryAttempts(0))
 	if err := client.Get(t.Context(), "/pods", nil); !errors.Is(err, runpod.ErrRateLimited) {
 		t.Fatalf("initial limit: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestLongRateLimitReturnsProviderErrorBeforeCallerDeadline(t *testing.T) {
 		w.WriteHeader(http.StatusTooManyRequests)
 	}))
 	defer server.Close()
-	client := mustClient(t, "fixture", runpod.WithGraphQLBaseURL(server.URL))
+	client := mustClient(t, "fixture", runpod.WithBaseURL(server.URL))
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 	_, err := client.ListDataCenters(ctx, nil)

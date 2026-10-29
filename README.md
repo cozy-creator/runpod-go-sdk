@@ -1,6 +1,8 @@
 # runpod-go-sdk
 
-Go client for the RunPod API: pods, serverless jobs, GPU catalog queries, network volumes, container registry auths, and secrets.
+Go client for RunPod's **REST v2 control plane** and separate **Serverless inference API**. Resource management, catalogs, billing, and pod logs use `https://api.runpod.io/v2`. Inference jobs use `https://api.runpod.ai/v2`.
+
+REST v1 and GraphQL support have been removed. This is a breaking SDK migration: requests and responses use native v2 fields. Old prepared purchase bodies are rejected before HTTP. See the [migration notes](docs/rest-v2-migration-20261028.md) for the official contract and unsupported legacy capabilities.
 
 ## Install
 
@@ -8,303 +10,149 @@ Go client for the RunPod API: pods, serverless jobs, GPU catalog queries, networ
 go get github.com/cozy-creator/runpod-go-sdk
 ```
 
-## Quick start
+## Create a pod
 
 ```go
 client, err := runpod.NewClient(os.Getenv("RUNPOD_API_KEY"))
-if err != nil {
-    log.Fatal(err)
-}
+if err != nil { return err }
 
-pod, err := client.CreatePod(ctx, &runpod.CreatePodRequest{
-    Name:              "worker-1",
-    ImageName:         "tensorhub/worker:torch2.13.0-cu130-cp312-linux-x86",
-    GPUTypeIDs:        []string{"NVIDIA GeForce RTX 4090", "NVIDIA GeForce RTX 3090"},
-    GPUCount:          1,
-    ContainerDiskInGB: 50,
-    CloudType:         "COMMUNITY",
+req := &runpod.CreatePodRequest{
+    Name:  "worker-1",
+    Image: "tensorhub/worker:torch2.13.0-cu130-cp312-linux-x86",
+    Disk:  50,
+    Cloud: "SECURE",
+    GPU: &runpod.CreateGPUConfig{
+        ID: "NVIDIA GeForce RTX 4090", Count: 1,
+        MinCUDAVersion: "12.8",
+        MinRAMPerGPU: 32, MinVCPUCountPerGPU: 4,
+    },
+}
+pod, err := client.CreatePod(ctx, req)
+```
+
+CPU pods set `CPU: &runpod.CreateCPUConfig{ID: "cpu5c", VCPUCount: 4}` and omit `GPU`. Exactly one compute configuration is required. CPU memory is derived by RunPod from the selected flavor; vCPU count must be a power of two.
+
+Persistent disks use `Mounts.Persistent`. Network and global volumes use `Mounts.Network` and `Mounts.Global`, each containing `VolumeMount{VolumeID, Path}`. A persistent disk cannot be combined with network/global mounts or CPU pods. Network volumes require Secure Cloud and compatible data center placement.
+
+`CreatePodWithFallback(ctx, req, candidates, opts)` explicitly tries one GPU type at a time. It advances only after a typed `ErrNoCapacity`; transport failures and unclassified server errors abort because a pod may already exist. Spot creation and bidding are unavailable in v2 and have no SDK methods.
+
+For durable purchase bookkeeping:
+
+```go
+body, err := client.PrepareCreatePod(req)
+// Persist body and its purchase obligation before calling the provider.
+pod, err := client.ExecuteCreatePod(ctx, body) // exact recorded bytes
+```
+
+`InspectPreparedCreatePod` validates those bytes without changing them. `FindPodsByName` scans every cursor page and returns all exact name matches. Names are not unique; callers own adoption decisions.
+
+## Pod reads and lifecycle
+
+`GetPod` returns native `Status`, `Image`, `Cost`, `GPU`/`CPU`, `Mounts`, `StartedAt`, and `Runtime` fields. Provider states (`PROVISIONING`, `STARTING`, `RUNNING`, `EXITED`, `ERROR`, `TERMINATED`) remain distinct. Runtime is null in list responses; fetch a single pod for live metrics. Provider RUNNING status does not prove application readiness.
+
+- `ListPods(ctx, opts)` follows cursor pagination through the remaining result set; options are `Limit`, `Cursor`, and `IncludeClusterPods`.
+- `GetPodReadback` preserves one independently timed REST observation and validates identity. Malformed successful responses match `ErrIncompleteReadback`; only a provider 404 proves API absence.
+- `ValidatedPublicTCPEndpoints` checks native runtime port mappings, preserving null public IP/port as unavailable.
+- `UpdatePod` sends PATCH; `RenamePod` changes only the name.
+- `StopPod`, `ResumePod`, and `RestartPod` use the v2 action endpoint. `TerminatePod` uses DELETE.
+- `GetPodDiagnostics`, `GetPodLifecycleObservation`, and `GetPodTerminalError` report evidence available through v2. Removed telemetry, machine IDs, exit codes, and spot flags are not synthesized.
+- `WaitForPodReady` and `PodTimingSnapshot` preserve provider timestamps and observed elapsed intervals. They do not invent image-pull durations.
+- `DiscoverSSHTarget` uses native SSH connection details; `StreamPodCommand` invokes system SSH for explicit diagnostics.
+
+## Catalogs and inventory
+
+```go
+offers, err := client.ListGPUOffers(ctx, &runpod.GPUOfferFilter{
+    CloudType: "SECURE", GPUCount: 2, MinCudaVersion: "12.8",
+    InStockOnly: true,
 })
+gpus, err := client.ListGPUTypes(ctx, &runpod.GPUTypeFilter{CloudType: "SECURE"})
+cpu, err := client.GetCPUOffer(ctx, runpod.CPUOfferRequest{
+    InstanceID: "cpu5c-4-8", DataCenterID: "EU-RO-1",
+})
+dcs, err := client.ListDataCenters(ctx, nil)
 ```
 
-### Client options
+Catalog availability reads explicitly use `include=AVAILABILITY&product=POD`. GPU cloud, count, and CUDA constraints scope stock. An empty offer cloud filter reads Secure and Community separately. GPU `maxCount` is a machine-size ceiling, never a current stock count.
 
-```go
-client, err := runpod.NewClient(apiKey,
-    runpod.WithTimeout(120*time.Second),      // HTTP timeout (default 30s)
-    runpod.WithMaxRetryAttempts(5),           // retries with exponential backoff + jitter
-    runpod.WithRetryDelay(2*time.Second),     // backoff base delay
-    runpod.WithDebug(true),                   // request/response logging
-    runpod.WithLogger(customLogger),
-    runpod.WithHTTPClient(customHTTPClient),
-    runpod.WithBaseURL(...),                  // REST base (default https://rest.runpod.io/v1)
-    runpod.WithServerlessBaseURL(...),        // serverless base (default https://api.runpod.ai)
-    runpod.WithGraphQLBaseURL(...),           // GraphQL base (default https://api.runpod.io/graphql)
-)
-```
+Catalog GPU rates are per GPU; CPU rates are per vCPU. Normalized `GPUOffer`/`CPUOffer` prices multiply the exact decimal rate into the requested whole-pod rate with overflow checks. `PriceSource` identifies catalog list pricing; a pod's `Cost` is separate provider evidence. There are no spot-floor prices, bandwidth floors, or CPU disk ceilings in v2.
 
-Retries: GETs and other idempotent requests retry on 5xx/429 with exponential backoff and jitter, honoring `Retry-After` on 429. POSTs never retry on 5xx (not idempotent, and RunPod uses 500 for ordinary stock-outs).
+`ObserveInventory` returns ordered per-request results and scoped errors. Within a pass, identical URLs share exact bytes; reads run sequentially with one HTTP attempt, and a rate limit/cancellation stops further HTTP. The caller owns refresh cadence. `NetworkVolumes` optionally adds a separately qualified volume snapshot. Missing/null requested lists or malformed required rows are errors, not known absence.
 
-A 429, or any answer whose `RateLimit` header shows an exhausted window (`"hour";r=0;t=6000`), retains a cooldown across all REST and GraphQL calls on that client, lasting the longest of `Retry-After` and every exhausted window; `Client.Cooldown()` reports what remains. Later calls return `ErrRateLimited` with the remaining `APIError.RetryAfter` without sending HTTP. The receiving call retries short waits; waits above 30 seconds or beyond its context return the original typed 429 immediately. Canceling a call does not erase the cooldown. Separate clients remain independent.
+The static `GPUCatalog`, `GPUsWithAtLeast`, and `GPUSpecByID` helpers remain available for GPU hardware metadata. Runtime stock and prices come from v2 catalogs.
 
-Inventory refreshes use `ObserveInventory(ctx, InventoryRequest{Availability: ..., GPUOffers: ..., CPUOffers: ...})`: each root is read in bounded requests (8 census or price aliases, 64 CPU aliases), one attempt each with no automatic retry; a rate limit stops the rest. The caller owns its refresh interval. Results follow input order and carry `DataCenters`/`Offers`/`Offer` plus `Err` for a failed alias or request; the call fails at method level only when every request failed. `GPUOfferFilter.CloudType` selects `SECURE` or `COMMUNITY`; empty keeps both clouds. The individual `ListDataCentersBatch`, `ListGPUOffersBatch` and `GetCPUOffersBatch` methods delegate to this operation when only one root is needed. All forms use the single-quote exact price and resource validators.
-
-Set `InventoryRequest.NetworkVolumes=true` to include the account's volume IDs, names, sizes and datacenters in that same HTTP request. `InventoryResult.NetworkVolumesErr` preserves a scoped volume-read failure without discarding valid market results. A missing/null requested root, list or required row field is an error; a valid empty list is known absence. Existing REST volume APIs remain independent lifecycle operations.
-
-## Pods
-
-| Function | Description |
-|----------|-------------|
-| `CreatePod` | Create a pod. With multiple `GPUTypeIDs`, fans out per type (see below) |
-| `PrepareCreatePod` / `ExecuteCreatePod` | Record one exact create body before sending those same bytes |
-| `CreatePodWithFallback` | Explicit per-GPU-type fan-out with filter/failure hooks |
-| `CreateSpotPod` | Create an interruptible (spot) pod |
-| `GetPod` / `GetPodWithOptions` | Fetch a pod (optional `includeMachine`, `includeNetworkVolume`, ...) |
-| `GetPodReadback` | Preserve independently timed REST + GraphQL pod evidence, detailed runtime/error facts, join checks, and a coherence grade |
-| `GetPodLifecycleObservation` | Read desired state, last-start timestamp, runtime uptime, and latest provider telemetry through GraphQL |
-| `GetPodTerminalError` | Classify provider-desired terminal states; unfenced telemetry remains diagnostic evidence |
-| `ListPods` | List pods with pagination |
-| `FindPodsByName` | Return every exact name match; makes no adoption/readiness inference |
-| `StopPod` / `ResumePod` / `TerminatePod` | Lifecycle |
-| `WaitForPodReady` | Poll until runtime is up; returns startup-timing decomposition |
-| `PodTimingSnapshot` | One-shot timing decomposition |
-| `GetPodDiagnostics` | Normalized diagnostics snapshot (runtime readiness, datacenter, reason) |
-| `GetProviderFeatureSupport` | Provider capability flags (REST v2 pod log streams supported) |
-
-### Stock-outs and GPU-type fallback
-
-RunPod's REST `POST /pods` does **not** walk a multi-entry `gpuTypeIds` list when the first type has no stock — it returns 500 "no instances available". The SDK owns that protocol quirk:
-
-```go
-pod, err := client.CreatePod(ctx, req) // multiple GPUTypeIDs → one request per type
-if errors.Is(err, runpod.ErrNoCapacity) {
-    // every candidate was out of stock
-    var exhausted *runpod.FallbackExhaustedError
-    if errors.As(err, &exhausted) {
-        for _, a := range exhausted.Attempts { ... }
-    }
-}
-```
-
-`CreatePodWithFallback` adds a `CandidateFilter` (skip recently-failed types) and an `OnAttemptFailure` hook for consumer-side failure tracking. It advances only after a typed `ErrNoCapacity`; transport failures and unclassified 5xx responses abort because the create outcome is ambiguous.
-
-For crash-safe purchase bookkeeping, prepare and durably record one candidate's exact body before executing it:
-
-```go
-body, err := client.PrepareCreatePod(req) // exactly one GPU type
-// Persist body and the purchase obligation here.
-pod, err := client.ExecuteCreatePod(ctx, body) // sends body unchanged
-```
-
-`FindPodsByName` supports ambiguous-create readback. Names are not unique, so it returns every exact match and leaves adoption, health, and product-readiness decisions to the caller.
-
-### Pod billing history
+## Billing
 
 ```go
 history, err := client.GetPodBillingHistory(ctx, podID, startUTC, endUTC)
-if err != nil { /* billing evidence is not usable */ }
+// Preserve NormalizedQuery, Query, and RawResponse as provider evidence.
 for _, record := range history.Records {
-    fmt.Printf("%s: %d USD micros for %d ms\n",
-        record.BucketStart, record.AmountUSDMicros, record.TimeBilledMs)
+    fmt.Println(record.BucketStart, record.BucketEnd, record.AmountUSDMicros)
 }
-// Persist history.NormalizedQuery and history.RawResponse as provider evidence.
 ```
 
-RunPod reports bucket times as zoneless UTC (`2026-09-28 09:00:00`) and amounts as float-computed decimals. Each amount rounds from its exact decimal to the nearest USD micro (never through `float64`); signed records are preserved as provider corrections, and the total is their checked sum. The exact response is limited to 16 MiB. A bucket only includes charges recorded before `endTime`, so query past the pod's end for its complete charge. An empty array is valid zero-cost evidence, but it is not a provider finality assertion.
+Billing uses native v2 `records` and `metadata`, including total, GPU, CPU, and disk amounts. Signed decimal amounts round directly to the nearest USD micro without passing through float64. The checked sum of individually rounded records and the independently rounded metadata total are retained separately. Responses are bounded to 16 MiB; failures preserve a typed `PodBillingEvidenceError` and complete bounded evidence.
 
-Post-response qualification failures return `*PodBillingEvidenceError`. Its stable `Kind`, `NormalizedQuery`, and bounded exact `RawResponse` can be recorded without reparsing provider JSON; `response_too_large` carries no partial body.
+The provider's echoed query must match the requested hourly window snapped outward to bucket edges. Bucket boundaries are not billed runtime. V2 does not expose billed duration or account balance; missing duration must remain unknown. An empty qualified record list is zero-cost evidence, not provider settlement finality.
 
-### Pod logs
-
-RunPod's public REST/GraphQL APIs expose no pod-log endpoint. The SDK deliberately has no log-fetching surface; use `GetPodDiagnostics` for status/runtime/machine troubleshooting.
-
-## GPU catalog (GraphQL)
+## Volumes, registries, secrets
 
 ```go
-gpus, err := client.ListGPUTypes(ctx, &runpod.GPUTypeFilter{MinCudaVersion: "12.8"})
-available, err := client.ListAvailableGPUs(ctx, "12.8", 1) // in-stock, sorted by price
-gpu, err := client.GetGPUType(ctx, "NVIDIA GeForce RTX 4090")
-```
-
-`ListAvailableGPUs` returns `StockStatus` and `LowestPrice` (bid/on-demand) per type.
-
-### Static SKU catalog
-
-The SDK owns a static `GPUSpec` catalog (type ID, VRAM, SM compute capability, consumer flag) covering Ampere through Blackwell (RTX 5090, B200, RTX PRO 6000 Blackwell, H200, ...), ordered by fallback preference:
-
-```go
-specs := runpod.GPUsWithAtLeast(24, 89) // >=24GB VRAM, SM >= 8.9
-req.GPUTypeIDs = runpod.GPUTypeIDs(specs) // directly usable as a fallback chain
-spec, ok := runpod.GPUSpecByID("NVIDIA GeForce RTX 4090")
-```
-
-Static data is verified against the live `gpuTypes` query by a live-gated test; refresh stock/pricing at runtime with `ListAvailableGPUs` / `ListGPUOffers`.
-
-### Offers and spot (interruptible) pods
-
-`ListGPUOffers` returns per-(GPU type x cloud) stock and pricing in one call, sorted by on-demand price — the placement view that connects the catalog to pod creation:
-
-```go
-offers, _ := client.ListGPUOffers(ctx, &runpod.GPUOfferFilter{MinCudaVersion: "12.8", InStockOnly: true})
-offer := offers[0] // cheapest in stock
-minimumBid, hasSpotFloor := offer.MinimumBidPerGPUUSDMicrosPerHour()
-if !hasSpotFloor { /* choose on-demand or another offer */ }
-pod, err := client.CreateSpotPod(ctx, &runpod.CreatePodRequest{
-    // ...
-    GPUTypeIDs: []string{offer.GPUTypeID},
-    CloudType:  offer.CloudType,
-    BidPerGPUUSDMicrosPerHour: minimumBid,
+volume, err := client.CreateNetworkVolume(ctx, &runpod.CreateNetworkVolumeRequest{
+    Name: "models", Size: 100, DataCenter: "EU-RO-1", Type: "STANDARD",
 })
-```
-
-Spot pricing: RunPod removed `interruptablePrice` (and `cudaVersion`) from the `lowestPrice` GraphQL type. The optional aggregate `MinimumBidPriceUSDMicrosPerHour` is the only spot signal still exposed; use `MinimumBidPerGPUUSDMicrosPerHour` for a ceil-safe executable bid.
-
-Reclaim: a preempted spot pod is stopped, not deleted — it reports `desiredStatus="EXITED"` with the runtime cleared. There is no dedicated preemption signal in the public API; treat an unexpected EXITED on an interruptible pod as a probable reclaim. Datacenter-level offer granularity is not exposed by the `lowestPrice` query; constrain placement with `DataCenterIDs`.
-
-## Serverless jobs
-
-| Function | Description |
-|----------|-------------|
-| `RunAsync` / `RunSync` | Submit a job (async returns immediately; sync blocks) |
-| `GetJobStatus` | Job status + results |
-| `WaitForJobCompletion` | Poll until terminal |
-| `RunAndWait` | RunAsync + WaitForJobCompletion |
-| `StreamResults` | Fetch partial/streaming results once |
-| `CancelJob` / `RetryJob` / `PurgeQueue` | Queue management |
-| `GetHealth` | Endpoint health |
-| `IsJobTerminal` | Terminal-status check |
-
-`Job.Input` / `Job.Output` / `Job.Stream` are `json.RawMessage` — unmarshal into your own types:
-
-```go
-job, err := client.RunSync(ctx, endpointID, map[string]any{"prompt": "hello"})
-var out MyOutput
-json.Unmarshal(job.Output, &out)
-```
-
-`RunSync` is bounded by the client HTTP timeout (default 30s); RunPod holds `/runsync` up to ~90s. Use `WithTimeout` or `RunAsync`+`WaitForJobCompletion` for longer jobs.
-
-## Network volumes and registry auths (REST)
-
-```go
-vols, err := client.ListNetworkVolumes(ctx)
-vol, err := client.CreateNetworkVolume(ctx, &runpod.CreateNetworkVolumeRequest{
-    Name: "models", Size: 100, DataCenterID: "EU-RO-1",
-})
-vol, err = client.UpdateNetworkVolume(ctx, vol.ID, &runpod.UpdateNetworkVolumeRequest{Size: 200}) // grow-only
-err = client.DeleteNetworkVolume(ctx, vol.ID)
-
-auth, err := client.CreateContainerRegistryAuth(ctx, &runpod.CreateContainerRegistryAuthRequest{
+volumes, err := client.ListNetworkVolumes(ctx) // follows cursor pages
+registry, err := client.CreateContainerRegistryAuth(ctx, &runpod.CreateContainerRegistryAuthRequest{
     Name: "my-registry", Username: "bob", Password: token,
 })
-auths, err := client.ListContainerRegistryAuths(ctx)
-err = client.DeleteContainerRegistryAuth(ctx, auth.ID)
 ```
 
-`IsRegistryAuthError(err)` classifies pod-create failures caused by bad/stale registry credentials.
+Network volume CRUD uses `/network-volumes`; registry credentials use `/registries`. Secret CRUD uses `/account/secrets`, with immutable IDs for single-resource operations and PATCH for updates. `CreateOrUpdateSecret` resolves an exact name before updating its ID. Secret values and registry passwords are write-only.
 
-Secrets: `CreateSecret` / `GetSecret` / `UpdateSecret` / `CreateOrUpdateSecret` / `DeleteSecret` / `ListSecrets`.
+## Serverless inference
 
-## Capability matrix
+`RunAsync`, `RunSync`, `GetJobStatus`, `WaitForJobCompletion`, `RunAndWait`, `StreamResults`, `CancelJob`, `RetryJob`, `PurgeQueue`, and `GetHealth` use the separate inference service. Input/output/stream fields remain `json.RawMessage`.
 
-| Resource | Transport | Coverage |
-|----------|-----------|----------|
-| Pods (CRUD, stop/resume, fallback, timing, diagnostics) | REST | Full |
-| Detailed pod readback | REST + GraphQL | Both source snapshots, observation windows, machine/price/volume/runtime evidence, public ports, per-field checks, typed stage failures |
-| Pod lifecycle observation | GraphQL | Query only |
-| Serverless jobs (run/runsync/status/cancel/retry/purge/health/stream) | REST (api.runpod.ai) | Full |
-| GPU types / availability / offers | GraphQL | Query only |
-| Network volumes | REST | Full CRUD |
-| Container registry auths | REST | Create/List/Delete |
-| Secrets | REST | Full CRUD |
-| Pod SSH diagnostics (`DiscoverSSHTarget`, `StreamPodCommand`) | GraphQL + system ssh | Dev/diagnostic only |
-| Pod logs | — | Not exposed by RunPod's public API |
-| Serverless endpoints / templates CRUD | — | Not implemented (no consumer) |
+The default HTTP timeout is 30 seconds, including `RunSync` and entire log streams. Configure a longer timeout or use asynchronous jobs when needed.
 
-## Error handling
-
-Two error types plus sentinels:
-
-- `*runpod.APIError` — HTTP errors; carries `StatusCode`, `Message`, `RetryAfter` (on 429)
-- `*runpod.ValidationError` — client-side input validation
-- `*runpod.NoCapacityError` / `*runpod.FallbackExhaustedError` — pod-create stock-outs
-
-Match with `errors.Is` / `errors.As`:
+## Client configuration and errors
 
 ```go
-switch {
-case errors.Is(err, runpod.ErrNotFound):
-case errors.Is(err, runpod.ErrUnauthorized):
-case errors.Is(err, runpod.ErrRateLimited):
-case errors.Is(err, runpod.ErrNoCapacity):
-}
+client, err := runpod.NewClient(apiKey,
+    runpod.WithBaseURL("https://api.runpod.io/v2"),
+    runpod.WithServerlessBaseURL("https://api.runpod.ai"),
+    runpod.WithTimeout(120*time.Second),
+    runpod.WithMaxRetryAttempts(3),
+    runpod.WithRetryDelay(time.Second),
+    runpod.WithHTTPClient(customHTTPClient),
+)
 ```
 
-`GetClientBalanceUSDMicros` returns the provider balance as exact integer USD micros, including a real zero, and refuses omitted/null, sub-micro, or overflowing balance data.
+There is one control-plane base, including logs. HTTP errors carry `*APIError` and their exact response bytes. Match `ErrNotFound`, `ErrUnauthorized`, `ErrRateLimited`, and `ErrNoCapacity` with `errors.Is`.
+
+Idempotent requests retry transient server/transport failures with exponential backoff and jitter. POSTs never retry those ambiguous failures. Rejected 429 requests honor the longest `Retry-After` or exhausted `RateLimit` window. Later requests retain the cooldown, even after cancellation. Long waits return typed errors promptly. `Cooldown()` reports the control-plane budget; `ServerlessCooldown(endpointID)` reports independent inference endpoint budgets.
+
+## Pod logs
+
+`StreamPodLogs` reads v2 SSE container/system logs. Its stream owns the response body: call `Close` and give long-running streams a caller-owned cancellation context, typically with `WithTimeout(0)`.
+
+`PodLogsOptions` supports `Source`, `Tail` (nil defaults to 100 per source, zero means live-only, maximum 5000), `Since`, and opaque `LastEventID`. Reconnect cursors take precedence over Since/Tail. IDs and timestamps can repeat; do not deduplicate by ID alone. The provider has no replay-complete marker and may withhold headers until a matching line exists. EOF/timeouts remain errors; callers own snapshot limits and reconnects. Logs are diagnostic evidence.
 
 ## Testing
 
 ```bash
-go test ./...                                    # unit tests (mock servers, no credentials)
-RUNPOD_API_KEY=... go test -tags live ./...      # + live API integration tests
+go fmt ./...
+go vet ./...
+go build ./...
+go test ./...
+go test -race ./...
+RUNPOD_API_KEY=... go test -tags live ./... # explicitly provided credentials, read-only by default
 ```
 
-Live tests are excluded by the `live` build tag and additionally skip when `RUNPOD_API_KEY` is unset. The spot-pod live test creates a real (cheap) pod and is further gated on `RUNPOD_LIVE_SPOT=1`.
+Live tests skip when credentials are unset. Tests that submit inference jobs or mutate queues additionally require `RUNPOD_LIVE_CREATE=1`. They never load `.env` automatically.
 
-### Fake server for consumers
-
-The `runpodtest` package is an in-process fake RunPod API — pods CRUD with per-GPU-type stock-out injection, network volumes, registry auths, the job lifecycle, gpuTypes queries, and one-shot 429/500 fault injection:
-
-```go
-srv := runpodtest.New()
-defer srv.Close()
-client := srv.MustClient()
-
-srv.SetGPUStockOut("NVIDIA GeForce RTX 4090", true)
-srv.FailNext(429, `{"error":"rate limited"}`, "1")
-srv.CompleteJob(endpointID, jobID, myOutput)
-```
+`runpodtest.New()` provides native REST v2 management and separate inference fixtures, cursor pages, per-GPU stock-out injection, pod logs, and one-shot HTTP fault injection. Removed resource paths return 404.
 
 ## License
 
 MIT
-
-### Pod startup and container logs (REST v2)
-
-`StreamPodLogs` reads `https://api.runpod.io/v2/pods/{id}/logs` using the same
-API key. This is separate from REST v1 CRUD and serverless inference hosts.
-`WithRESTV2BaseURL` overrides only the REST v2 base.
-
-```go
-client, err := runpod.NewClient(apiKey, runpod.WithTimeout(0))
-if err != nil { return err }
-// ctx belongs to the caller: cancel it when the observation is complete.
-tail := 100
-stream, err := client.StreamPodLogs(ctx, podID, &runpod.PodLogsOptions{
-    Source: runpod.PodLogSourceSystem,
-    Tail: &tail,
-})
-if err != nil { return err }
-defer stream.Close()
-for {
-    entry, err := stream.Next()
-    if err != nil { return err }
-    // Preserve entry.ID as LastEventID when explicitly reconnecting.
-    observe(entry.Source, entry.Line, entry.Timestamp, entry.ID)
-}
-```
-
-The wire format is SSE, decoded into `PodLogEntry`; it is not wire JSONL. Omit
-Source for both streams; Tail applies per source, nil uses100 and zero means no
-history. Since is RFC3339 time. LastEventID takes precedence over Since and Tail
-and remains opaque, including provider sequence suffixes. IDs and timestamps can
-repeat on distinct lines; do not deduplicate by ID alone. Tail is at most5000.
-The API does not signal replay completion and may withhold even HTTP headers until
-it has a matching line. Context/client timeout and EOF remain errors, not successful
-empty snapshots. The caller owns snapshot limits and reconnects; the SDK does not
-invent idle-completion rules or silently replay delivered entries. The configured
-HTTP client timeout covers the whole stream; use WithTimeout(0) with a caller-owned
-context for long-lived streams. Log text is diagnostic evidence, not pod lifecycle
-authority.
-
-Contract: [official OpenAPI](https://api.runpod.io/v2/openapi.json) and
-[official runpodctl logs documentation](https://github.com/runpod/runpodctl#reading-logs).

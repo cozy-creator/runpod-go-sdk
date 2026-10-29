@@ -38,7 +38,7 @@ func TestPodLogsSSEReplayFieldsAndClose(t *testing.T) {
 	}))
 	defer server.Close()
 	tail := 5000
-	client := mustClient(t, "test_key", runpod.WithBaseURL("https://v1.invalid"), runpod.WithRESTV2BaseURL(server.URL+"/v2"), runpod.WithTimeout(0))
+	client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL+"/v2"), runpod.WithTimeout(0))
 	stream, err := client.StreamPodLogs(context.Background(), "pod-1", &runpod.PodLogsOptions{Source: runpod.PodLogSourceSystem, Tail: &tail, Since: time.Date(2026, 9, 25, 20, 38, 40, 0, time.UTC), LastEventID: cursor})
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +76,7 @@ func TestPodLogsCancellationBeforeHeadersAndDuringRead(t *testing.T) {
 				<-r.Context().Done()
 			}))
 			defer server.Close()
-			client := mustClient(t, "test_key", runpod.WithRESTV2BaseURL(server.URL), runpod.WithTimeout(0))
+			client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL), runpod.WithTimeout(0))
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			answer := make(chan error, 1)
@@ -112,7 +112,7 @@ func TestPodLogsHTTPRetryAndProblemError(t *testing.T) {
 		fmt.Fprint(w, "id: cursor/2\ndata: {\"source\":\"system\",\"line\":\"start container\",\"ts\":\"2026-09-25T20:44:04Z\"}\n\n")
 	}))
 	defer server.Close()
-	client := mustClient(t, "test_key", runpod.WithRESTV2BaseURL(server.URL), runpod.WithRetryDelay(time.Nanosecond))
+	client := mustClient(t, "test_key", runpod.WithBaseURL(server.URL), runpod.WithRetryDelay(time.Nanosecond))
 	stream, err := client.StreamPodLogs(context.Background(), "pod", &runpod.PodLogsOptions{LastEventID: "cursor/1"})
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +135,7 @@ func TestPodLogsHTTPRetryAndProblemError(t *testing.T) {
 				fmt.Fprint(w, `{"title":"Forbidden","status":403,"detail":"provider diagnostic"}`)
 			}))
 			defer s.Close()
-			c := mustClient(t, "test_key", runpod.WithRESTV2BaseURL(s.URL), runpod.WithMaxRetryAttempts(0))
+			c := mustClient(t, "test_key", runpod.WithBaseURL(s.URL), runpod.WithMaxRetryAttempts(0))
 			_, err := c.StreamPodLogs(context.Background(), "pod", nil)
 			var api *runpod.APIError
 			if !errors.As(err, &api) || api.StatusCode != status || api.Message != "provider diagnostic" || len(api.ResponseBody) == 0 {
@@ -166,7 +166,7 @@ func TestPodLogsFramingRefusalsAndLargeLine(t *testing.T) {
 				fmt.Fprint(w, tc.body)
 			}))
 			defer server.Close()
-			c := mustClient(t, "test_key", runpod.WithRESTV2BaseURL(server.URL))
+			c := mustClient(t, "test_key", runpod.WithBaseURL(server.URL))
 			s, err := c.StreamPodLogs(context.Background(), "pod", nil)
 			if err == nil {
 				defer s.Close()
@@ -185,7 +185,7 @@ func TestPodLogsFramingRefusalsAndLargeLine(t *testing.T) {
 
 func TestPodLogsOptionsValidateWithoutRequest(t *testing.T) {
 	negative, large := -1, 5001
-	c := mustClient(t, "test_key", runpod.WithRESTV2BaseURL("http://unused.invalid"))
+	c := mustClient(t, "test_key", runpod.WithBaseURL("http://unused.invalid"))
 	for _, options := range []*runpod.PodLogsOptions{{Source: "other"}, {Tail: &negative}, {Tail: &large}, {LastEventID: "x\r\nInjected: y"}} {
 		_, err := c.StreamPodLogs(context.Background(), "pod", options)
 		var validation *runpod.ValidationError

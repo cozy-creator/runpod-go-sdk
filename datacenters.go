@@ -5,98 +5,106 @@ import (
 	"fmt"
 )
 
-// DataCenter is one RunPod placement location together with its current
-// per-GPU inventory. StockStatus is provider-owned telemetry (for example
-// High, Medium, Low); callers decide freshness and placement policy.
-//
-// StorageSupport is the provider's own answer to whether this location can
-// host a network volume at all. It is a property of the location, not of the
-// account or the request: where it is false, CreateNetworkVolume is refused
-// and no pod placed here can ever mount one. 30 of RunPod's 49 locations
-// answer false, so a caller that cannot see this field cannot distinguish a
-// datacenter whose cache is merely absent from one where a cache is
-// impossible.
+// DataCenter keeps native REST v2 location/storage facts and a normalized Pod
+// availability view assembled from the scoped GPU catalog.
 type DataCenter struct {
-	ID              string                        `json:"id"`
-	Name            string                        `json:"name"`
-	Location        string                        `json:"location"`
-	StorageSupport  bool                          `json:"storageSupport"`
-	GPUAvailability []GPUAvailabilityInDataCenter `json:"gpuAvailability"`
+	ID                 string                        `json:"id"`
+	Name               string                        `json:"name"`
+	Region             string                        `json:"region"`
+	NetworkVolumeTypes []string                      `json:"networkVolumeTypes"`
+	Compliance         []string                      `json:"compliance"`
+	GlobalNetwork      bool                          `json:"globalNetwork"`
+	Location           string                        `json:"-"`
+	StorageSupport     bool                          `json:"-"`
+	GPUAvailability    []GPUAvailabilityInDataCenter `json:"-"`
 }
 
-// GPUAvailabilityInDataCenter is RunPod's current stock observation for one
-// exact GPU type in one data center.
+// GPUAvailabilityInDataCenter preserves the cloud whose scoped request supplied
+// its stock. A both-cloud census can contain two rows for the same GPU type.
 type GPUAvailabilityInDataCenter struct {
-	GPUTypeID   string `json:"gpuTypeId"`
-	DisplayName string `json:"displayName"`
-	StockStatus string `json:"stockStatus"`
-	Available   bool   `json:"available"`
+	GPUTypeID   string
+	DisplayName string
+	CloudType   string
+	StockStatus string
+	Available   bool
 }
 
-// GPUAvailabilityFilter asks RunPod whether a data center can satisfy the
-// complete machine shape, rather than returning the API's default one-GPU
-// view. Zero values are omitted.
+// GPUAvailabilityFilter contains only REST v2 catalog placement filters.
+// A nil SecureCloud reads both clouds; true selects SECURE, false COMMUNITY.
 type GPUAvailabilityFilter struct {
-	GPUCount            int      `json:"gpuCount,omitempty"`
-	MinDisk             int      `json:"minDisk,omitempty"`
-	MinMemoryInGB       int      `json:"minMemoryInGb,omitempty"`
-	MinVCPUCount        int      `json:"minVcpuCount,omitempty"`
-	SecureCloud         *bool    `json:"secureCloud,omitempty"`
-	AllowedCUDAVersions []string `json:"allowedCudaVersions,omitempty"`
-	MinCUDAVersion      string   `json:"minCudaVersion,omitempty"`
-	IncludeAIAPI        *bool    `json:"includeAiApi,omitempty"`
+	GPUCount            int
+	SecureCloud         *bool
+	AllowedCUDAVersions []string
+	MinCUDAVersion      string
+	CountryCodes        []string
 }
 
-type graphQLDataCenterPayload struct {
-	DataCenters []DataCenter `json:"dataCenters"`
+func validateGPUAvailabilityFilter(f *GPUAvailabilityFilter) error {
+	if f == nil {
+		return nil
+	}
+	return validateGPUOfferFilter(&GPUOfferFilter{GPUCount: f.GPUCount, MinCudaVersion: f.MinCUDAVersion, AllowedCudaVersions: f.AllowedCUDAVersions, CountryCodes: f.CountryCodes})
 }
-
-// ListDataCenters returns RunPod's authoritative per-datacenter GPU stock
-// snapshot. It performs one bounded GraphQL request; caching, refresh cadence,
-// and placement-failure policy belong to the orchestrator, not the SDK.
-func (c *Client) ListDataCenters(ctx context.Context, filter *GPUAvailabilityFilter) ([]DataCenter, error) {
-	if err := validateGPUAvailabilityFilter(filter); err != nil {
+func (c *Client) listDataCenters(ctx context.Context, f *GPUAvailabilityFilter, read catalogReader) ([]DataCenter, error) {
+	if err := validateGPUAvailabilityFilter(f); err != nil {
 		return nil, err
 	}
-	const query = `
-query($input: GpuAvailabilityInput) {
-  dataCenters {
-    id
-    name
-    location
-    storageSupport
-    gpuAvailability(input: $input) {
-      gpuTypeId
-      displayName
-      stockStatus
-      available
-    }
-  }
-}`
-
-	var payload graphQLDataCenterPayload
-	variables := map[string]interface{}{}
-	if filter != nil {
-		variables["input"] = filter
+	if f == nil {
+		f = &GPUAvailabilityFilter{}
 	}
-	if err := c.GraphQL(ctx, query, variables, &payload); err != nil {
-		return nil, fmt.Errorf("failed to list data centers: %w", err)
+	centers, err := catalogList[DataCenter](ctx, read, "/catalog/datacenters", "dataCenters")
+	if err != nil {
+		return nil, err
 	}
-	return payload.DataCenters, nil
-}
-
-func validateGPUAvailabilityFilter(filter *GPUAvailabilityFilter) error {
-	if filter != nil {
-		switch {
-		case filter.GPUCount < 0:
-			return NewValidationError("gpuCount", "cannot be negative")
-		case filter.MinDisk < 0:
-			return NewValidationError("minDisk", "cannot be negative")
-		case filter.MinMemoryInGB < 0:
-			return NewValidationError("minMemoryInGb", "cannot be negative")
-		case filter.MinVCPUCount < 0:
-			return NewValidationError("minVcpuCount", "cannot be negative")
+	byID := make(map[string]int, len(centers))
+	for i := range centers {
+		dc := &centers[i]
+		if dc.ID == "" || dc.Name == "" || dc.Region == "" || dc.NetworkVolumeTypes == nil {
+			return nil, fmt.Errorf("RunPod returned incomplete datacenter row")
+		}
+		if _, exists := byID[dc.ID]; exists {
+			return nil, fmt.Errorf("RunPod returned duplicate datacenter %q", dc.ID)
+		}
+		byID[dc.ID] = i
+		dc.Location = dc.Region
+		dc.StorageSupport = len(dc.NetworkVolumeTypes) > 0
+		dc.GPUAvailability = make([]GPUAvailabilityInDataCenter, 0)
+	}
+	clouds := []string{"SECURE", "COMMUNITY"}
+	if f.SecureCloud != nil {
+		if *f.SecureCloud {
+			clouds = []string{"SECURE"}
+		} else {
+			clouds = []string{"COMMUNITY"}
 		}
 	}
-	return nil
+	for _, cloud := range clouds {
+		gpus, err := c.listGPUTypes(ctx, &GPUTypeFilter{GPUCount: f.GPUCount, CloudType: cloud, MinCudaVersion: f.MinCUDAVersion, AllowedCudaVersions: f.AllowedCUDAVersions, CountryCodes: f.CountryCodes}, read)
+		if err != nil {
+			return nil, err
+		}
+		for _, gpu := range gpus {
+			supported := gpu.Secure
+			if cloud == "COMMUNITY" {
+				supported = gpu.Community
+			}
+			if !supported {
+				continue
+			}
+			if len(gpu.DataCenters) == 0 && gpu.Availability != "NONE" {
+				return nil, fmt.Errorf("RunPod omitted datacenters for available GPU %s", gpu.ID)
+			}
+			for _, availability := range gpu.DataCenters {
+				i, exists := byID[availability.ID]
+				if !exists {
+					return nil, fmt.Errorf("RunPod GPU availability names unknown datacenter %q", availability.ID)
+				}
+				centers[i].GPUAvailability = append(centers[i].GPUAvailability, GPUAvailabilityInDataCenter{GPUTypeID: gpu.ID, DisplayName: gpu.Name, CloudType: cloud, StockStatus: availability.Availability, Available: isAvailableStockStatus(availability.Availability)})
+			}
+		}
+	}
+	return centers, nil
+}
+func (c *Client) ListDataCenters(ctx context.Context, f *GPUAvailabilityFilter) ([]DataCenter, error) {
+	return c.listDataCenters(ctx, f, c.Get)
 }
